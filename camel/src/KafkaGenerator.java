@@ -36,7 +36,7 @@ public class KafkaGenerator implements Callable<Integer> {
     @Option(names="--relationships", arity="0..1", fallbackValue="10", description="Record count; 10 when selected without a value, otherwise omitted types are empty.") Integer relationships;
     @Option(names="--transactions", arity="0..1", fallbackValue="10", description="Record count; 10 when selected without a value, otherwise omitted types are empty.") Integer transactions;
     @Option(names="--brokers", description="Kafka bootstrap servers; defaults to CAMEL_BROKERS or localhost:19092.") String brokers;
-    @Option(names="--batch-date", description="Control date to publish; may be used alone. With data, must equal --date minus one day.") LocalDate batchDate;
+    @Option(names="--batch-date", description="Active business date to publish; may be used alone. With data, must equal --date.") LocalDate batchDate;
     @Option(names="--max-pending", defaultValue="1000") int maxPending;
     @Option(names="--topic", description="Override kind=topic (customer, account, relationship, transaction, batch-date).") Map<String,String> overrides;
     @Option(names="--seed", defaultValue="42", description="Random seed (default: ${DEFAULT-VALUE}).") long seed;
@@ -54,9 +54,8 @@ public class KafkaGenerator implements Callable<Integer> {
         if(maxPending<1) throw new IllegalArgumentException("max-pending must be positive");
         if (batchDate != null) {
             Records.date(batchDate.toString());
-            Records.date(batchDate.plusDays(1).toString());
-            if (dataSelected && !batchDate.plusDays(1).equals(date))
-                throw new IllegalArgumentException("--batch-date must equal --date minus one day when generating data");
+            if (dataSelected && !batchDate.equals(date))
+                throw new IllegalArgumentException("--batch-date must equal --date when generating data");
         }
         var topics=banking.KafkaGenerator.topics();
         if(overrides!=null) for(var entry:overrides.entrySet()) {

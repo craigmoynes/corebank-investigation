@@ -27,7 +27,6 @@ public final class KafkaGenerator {
             throw new IllegalArgumentException("Missing batch-date topic");
         if(batchDate!=null) {
             Records.date(batchDate.toString());
-            Records.date(batchDate.plusDays(1).toString());
             producer.send(new ProducerRecord<>(topics.get("batch-date"),0,"clock",batchDate.toString())).get();
         }
         var pending=new ArrayDeque<Future<RecordMetadata>>();

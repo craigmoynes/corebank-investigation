@@ -27,7 +27,7 @@ public final class Store {
     public LocalDate accept(Source source) throws Exception {
         return inTransaction(db -> {
             LocalDate control;
-            try (var s=db.createStatement(); var r=s.executeQuery("SELECT control_date FROM camel_ingest.clock WHERE singleton FOR UPDATE")) {
+            try (var s=db.createStatement(); var r=s.executeQuery("SELECT active_date FROM camel_ingest.clock WHERE singleton FOR UPDATE")) {
                 if (!r.next()) throw new IllegalStateException("Missing clock singleton");
                 control=r.getObject(1,LocalDate.class);
             }
@@ -43,13 +43,13 @@ public final class Store {
             if (Topics.DATE.equals(source.topic())) {
                 if (!"clock".equals(source.key())) throw new IllegalArgumentException("system.batch-date key must be clock");
                 LocalDate next=Records.date(source.payload());
-                LocalDate active=Records.date(next.plusDays(1).toString());
-                if (control != null && !next.equals(control) && !next.equals(control.plusDays(1)))
-                    throw new IllegalArgumentException("Date must repeat or advance exactly one calendar day; current="+control+", received="+next);
+                LocalDate active=next;
+                if (control != null && next.isBefore(control))
+                    throw new IllegalArgumentException("Date must repeat or advance to a later business date; current="+control+", received="+next);
                 if (control == null || !control.equals(next)) {
-                    if (control != null) execute(db,"UPDATE camel_ingest.batch SET closed=TRUE WHERE batch_date=?",control.plusDays(1));
+                    if (control != null) execute(db,"UPDATE camel_ingest.batch SET closed=TRUE WHERE batch_date=?",control);
                     execute(db,"INSERT INTO camel_ingest.batch(batch_date) VALUES (?) ON CONFLICT DO NOTHING",active);
-                    execute(db,"UPDATE camel_ingest.clock SET control_date=?,updated_at=now() WHERE singleton",next);
+                    execute(db,"UPDATE camel_ingest.clock SET active_date=?,updated_at=now() WHERE singleton",next);
                 }
                 receipt(db,source,active);
                 return active;
@@ -58,7 +58,7 @@ public final class Store {
             String kind=source.topic().startsWith("input.") ? source.topic().substring(6) : "";
             Records.Row row=Records.decode(kind,source.payload());
             if (!row.key().equals(source.key())) throw new IllegalArgumentException("Kafka key must match business key "+row.key());
-            LocalDate active=control.plusDays(1);
+            LocalDate active=control;
             // A transaction ID is immutable even within a day's staging; identical repeats are safe.
             if (kind.equals("transaction")) {
                 try (var s=db.prepareStatement("SELECT fixed_line FROM camel_ingest.record WHERE batch_date=? AND kind='transaction' AND business_key=?")) {

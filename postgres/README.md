@@ -104,3 +104,20 @@ command generates balance files from completed snapshots; it does not read live
 balances or post transactions. Dates completed before migration 005 cannot be
 exported because they have no historical snapshot. See the balance output contract
 in docs/banking-core-design.md.
+
+## Camel business-date migration
+
+Migration 007 creates Camel staging, clock, and receipt tables. Migration 008
+renames `camel_ingest.clock.control_date` to `active_date` and converts non-null
+legacy values to the existing open batch date (old value + one day). It leaves
+batch dates, source receipts, staged data, and a fresh null clock unchanged.
+
+Both core and Camel launchers apply the shared changelog. Before starting either
+updated launcher against existing data, follow the [coordinated upgrade procedure](../camel/README.md#upgrade-from-the-date-plus-one-clock):
+drain old-format events, stop Camel, and update publishers and consumers together.
+The SQL migration cannot inspect pending Kafka events. It rejects a running Camel
+lease or inconsistent clock/batch state. `reset-data.sql` now requires migration 008.
+
+Migration 009 adds `camel_ingest.receipt.staged_at`. New receipts default to
+`clock_timestamp()` at insertion; old receipts stay NULL rather than receiving an
+invented historical timestamp. Replays retain their original timestamp and date.

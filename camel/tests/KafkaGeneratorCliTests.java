@@ -48,13 +48,18 @@ public class KafkaGeneratorCliTests {
     @Test void dataStillRequiresDateAndMatchingControl() {
         var missing=parse("--batch-date=2026-10-17","--customers=1");
         assertTrue(assertThrows(IllegalArgumentException.class,missing::call).getMessage().contains("--date is required"));
-        var mismatch=parse("--date=2026-10-17","--batch-date=2026-10-17","--all");
-        assertTrue(assertThrows(IllegalArgumentException.class,mismatch::call).getMessage().contains("minus one day"));
+        var mismatch=parse("--date=2026-10-17","--batch-date=2026-10-16","--all");
+        assertTrue(assertThrows(IllegalArgumentException.class,mismatch::call).getMessage().contains("--batch-date must equal --date"));
         assertThrows(IllegalArgumentException.class,parse("--date=2026-10-17")::call);
         assertThrows(IllegalArgumentException.class,parse()::call);
     }
+    @Test void finalSupportedDatePublishesWithoutAddingADay() throws Exception {
+        var command=parse("--batch-date=9999-12-31");
+        assertEquals(0,command.call());
+        assertEquals("9999-12-31",command.producer.history().getFirst().value());
+    }
     @Test void invalidControlFailsBeforePublication() {
-        for(String value:new String[]{"0000-01-01","9999-12-31"}) {
+        for(String value:new String[]{"0000-01-01","+10000-01-01"}) {
             var command=parse("--batch-date="+value);
             assertThrows(IllegalArgumentException.class,command::call);
             assertTrue(command.producer.history().isEmpty());

@@ -9,7 +9,7 @@ and [Docker guide](../docker/README.md) for the surrounding runtime.
 
 | Topic | Kafka key | Value |
 | --- | --- | --- |
-| `system.batch-date` | `clock` | Plain `YYYY-MM-DD`, **not JSON**; assigned business date is this date + one day |
+| `system.batch-date` | `clock` | Plain `YYYY-MM-DD`, **not JSON**; the new active business date |
 | `input.customer` | decimal customerId | Full customer JSON |
 | `input.account` | decimal accountId | Full account JSON |
 | `input.relationship` | `accountId:customerId` | Full relationship JSON |
@@ -52,11 +52,11 @@ Environment overrides:
 | `COREBANK_OUTPUT_DIRECTORY` | `data/output` |
 | `COREBANK_ERROR_DIRECTORY` | `data/error` |
 
-The launcher applies the shared Liquibase changelog, including migration 007, then
+The launcher applies the shared Liquibase changelog, including migrations 008 and 009, then
 holds a database session lease to prevent a second route application for that DB.
-The existing core watcher can run concurrently. The running core image need not be
-restarted merely to use Camel; rebuild it before its next deployment so that its
-bundled changelog includes migration 007. Never run a file generator or another
+The core watcher can run concurrently after the upgrade. Existing installations
+must follow the [migration procedure](#upgrade-from-the-date-plus-one-clock) before
+starting either updated application; rebuild the core image to include migrations 008 and 009. Never run a file generator or another
 extractor against the same input date while Camel owns it.
 
 ## Input examples
@@ -82,18 +82,43 @@ semantics remain the same as the existing core readers.
 {"transactionId":3,"accountId":2,"type":"CR","amount":12345}
 ```
 
-Example with a local `rpk` installation (same broker as `CAMEL_BROKERS`):
+Example on a fresh clock with a local `rpk` installation (same broker as `CAMEL_BROKERS`):
 
 ```sh
-printf '%s\n' '2026-10-08' | rpk topic produce system.batch-date -k clock -X brokers=localhost:19092
+printf '%s\n' '2026-10-09' | rpk topic produce system.batch-date -k clock -X brokers=localhost:19092
 printf '%s\n' '{"accountId":2,"startDate":"2026-10-09","endDate":null,"accountType":"CHECKING"}' | rpk topic produce input.account -k 2 -X brokers=localhost:19092
 ```
 
-The first control opens October 9. The next control value `2026-10-09` closes
-October 9 and opens October 10. Cross-topic producer order is **not** a batch
-boundary: wait until the intended inputs are staged/acknowledged before sending
+The first control opens October 9 without closing any earlier date. The next
+control value `2026-10-10` closes October 9 and opens October 10. On an existing
+clock, confirm the requested date is active before publishing its data. Cross-topic
+producer order is **not** a batch boundary: wait until the intended inputs are
+committed in PostgreSQL before sending
 the next control event if you need them in the preceding batch. Even a record
 produced earlier belongs to the new date if it first stages after the transition.
+
+## Initialization and business-date transitions
+
+The first `system.batch-date` event is the authoritative initial business date.
+Deployment/setup supplies an explicit date by publishing that event and confirms
+it in PostgreSQL before treating ingestion as ready. There is no wall-clock default,
+startup date override, or date inferred from the first data record.
+
+A fresh database has a null `clock.active_date` and no batches. Input routes wait
+and retry without committing offsets until the first clock event atomically opens
+its date and persists it. A restart resumes the stored date; setup must not resend
+an old initialization date on every restart. A repeat of the current date is safe.
+
+The next date may be any later calendar date, including a jump over weekends or
+holidays. Skipped dates do not create batches. Advancing closes the prior batch and opens the new batch in one
+transaction. Input can stage in the new batch while the old batch is processed.
+The wall-clock cutoff is independent: advancing at 10 p.m. or 9 a.m. has the same
+meaning. Assignment follows the database lock boundary, not Kafka publication time.
+
+This release retains that staging-time boundary. It does not implement per-topic
+offset barriers or guarantee original day membership when replaying a backlog into
+an empty database. If that guarantee is required, define a stronger cutoff protocol
+before relying on this integration for it.
 
 ## Check staging before closing a date
 
@@ -106,13 +131,13 @@ docker compose -f docker/compose.yaml exec postgres psql -U postgres -d corebank
 For the quick-start batch, inspect the clock, batch state, and staged counts:
 
 ```sql
-SELECT control_date FROM camel_ingest.clock;
+SELECT active_date FROM camel_ingest.clock;
 SELECT * FROM camel_ingest.batch ORDER BY batch_date;
 SELECT kind, count(*) FROM camel_ingest.record
 WHERE batch_date = DATE '2026-10-17' GROUP BY kind ORDER BY kind;
 ```
 
-For a fresh `--all` run, expect control date `2026-10-16`, an open October 17
+For a fresh `--all` run, expect active date `2026-10-17`, an open October 17
 batch, and ten staged records of each of the four kinds before closing that date.
 For other runs, reconcile the intended business keys and records; reference
 upserts and duplicate records mean counts alone are not always sufficient.
@@ -121,14 +146,18 @@ Use `\q` to exit. Broker acknowledgement alone does not confirm staging.
 ## Route and recovery behavior
 
 1. The date route persists its clock and opens/closes batches atomically. A repeated
-   date is a no-op; a new date must advance exactly one calendar day. The first
+   date is a no-op; a new date may advance to any later date. The first
    control initializes the active date without extracting any earlier dates.
 2. Four data routes wait/retry without committing until the first control arrives.
    A `FOR UPDATE` lock on the clock row serializes staging and date transitions.
    The lock acquisition order defines the boundary across topics. No producer-time
    ordering or global ordering across topics is claimed.
 3. Each DB transaction saves a source receipt and its original assigned date along
-   with the staged record. Kafka manual commit occurs afterward on the consumer
+   with the staged record. Migration 009 adds `receipt.staged_at`, populated using
+   database `clock_timestamp()` at receipt insertion after acquiring the clock lock.
+   It is not Kafka arrival or commit time. Replay preserves it; pre-migration
+   receipts remain NULL because their original times are unknown.
+   Kafka manual commit occurs afterward on the consumer
    thread. Replay after a date transition returns the original assignment. Reference
    updates use the highest source offset for each batch/business key. Conflicting
    transaction content for the same ID in a batch is rejected; identical repeats
@@ -174,6 +203,38 @@ already-running exchanges remain committed. Retain receipts while offsets can be
 replayed. Database loss, topic recreation, and retention cleanup require coordinated
 operator recovery; they are not automated.
 
+## Upgrade from the date-plus-one clock
+
+Migration 008 changes `clock.control_date` to `clock.active_date` and adds one day
+to each non-null legacy value. For example, old control October 9 becomes active
+October 10. Existing batches, staged records, source receipts, and output dates
+remain unchanged. A fresh null clock stays null; migration does not initialize it.
+
+1. Stop clock and input publishers. With the old Camel version still running,
+   drain all pending clock and input events and verify their PostgreSQL receipts
+   and consumer positions against the paused topics' end offsets. Broker send
+   acknowledgement alone is insufficient. Let closed batches finish processing.
+2. Stop Camel and the core watcher. Preserve the database, Kafka topics/group
+   positions, and input/output/error files together for recovery. Do not reset the
+   group, delete receipts, or recreate topics as part of this upgrade.
+3. Deploy the updated publishers, Camel, and rebuilt core image together. Either
+   updated application applies migration 008 on startup. The migration refuses
+   a running Camel application lease, a missing clock, or a clock inconsistent
+   with its open batch; investigate the state rather than bypassing the checks.
+4. Verify `active_date` equals the previously open batch date. Resume Camel/core,
+   then publishers using the new convention. The next event is the next active
+   date; generators supplying both flags must use matching `--date` and
+   `--batch-date` values. Do not send a fresh initialization date on this restart.
+
+The plain date payload cannot identify legacy semantics. Unprocessed old clock
+messages **must be drained before upgrading**; migration cannot detect or translate
+Kafka backlog. A legacy event whose receipt already exists replays safely with its
+original assignment. An unreceipted legacy date might be rejected or might look
+like a valid new-convention date, so rejection is not a compatibility mechanism.
+If the old consumer cannot drain the backlog, stop and reconcile it explicitly
+before upgrading. Do not run old binaries against the migrated schema or roll back
+only the application; recovery requires restoring a coordinated pre-upgrade state.
+
 Migration 007 stores `clock`, `batch`, `receipt`, `record`, and `publication` in
 `camel_ingest`. The four named record types are exposed as views over `record`;
 shared storage keeps assignment, source identity, and file-format validation in one
@@ -191,8 +252,9 @@ uses the actual production topic names and replays from earliest offsets.
 sh camel/tests/run.sh
 ```
 
-It covers strict input contracts, clock persistence, repeated/backward/skipped dates,
-source replay after rollover, reference upserts, transaction conflicts, row-lock
+It covers strict input contracts, clock persistence, repeated/backward dates and forward jumps,
+legacy clock migration and lease/state guards, source replay after rollover,
+reference upserts, transaction conflicts, racing input/clock assignment, row-lock
 coordination, empty/conflicting files, extraction crash recovery, core
 reader/posting/output round-trip, failed broker publication, actual Camel Kafka
 consumers/producers, and route restart. Existing core tests remain available as
@@ -213,11 +275,11 @@ From the repository root, with migrated database credentials exported and topics
 provisioned as above:
 
 ```sh
-# Publish only the clock event; no business date or database connection needed.
-jbang camel/src/KafkaGenerator.java --batch-date=2026-10-16
+# Publish only the active business date; no --date or database connection needed.
+jbang camel/src/KafkaGenerator.java --batch-date=2026-10-17
 
-# Opens business date October 17, then publishes ten records of each type.
-jbang camel/src/KafkaGenerator.java --date=2026-10-17 --all --batch-date=2026-10-16
+# Fresh clock only: initialize October 17 and publish ten records of each type.
+jbang camel/src/KafkaGenerator.java --date=2026-10-17 --all --batch-date=2026-10-17
 
 # No clock event; use the date already active in Camel.
 jbang camel/src/KafkaGenerator.java --date=2026-10-17 --transactions=1000
@@ -229,13 +291,17 @@ jbang camel/src/KafkaGenerator.java --date=2026-10-17 --customers=100 --accounts
 `--date` controls generated account dates and eligibility and is required only
 when selecting data record types. `--batch-date` alone publishes the literal
 `system.batch-date` value without starting Spring or connecting to the database.
-With data selected, it must equal `--date` minus one day.
+With data selected, it must equal `--date`.
 It is acknowledged before record generation/publication begins. Acknowledgement
 is not confirmation that Camel processed the clock: ordering across topic
-consumers remains unchanged. Without this option no control event is sent.
-A standalone control uses the supplied date as-is; Camel opens the following
-business day. If `--date` is also supplied without data types, it is unused.
-Control dates must allow a following business day in the supported years 0001–9999.
+consumers remains unchanged. On an initialized system, publish the date separately,
+confirm it is active in PostgreSQL, and then publish data while no other publisher
+advances the clock. Otherwise data may stage under the prior date even though the
+clock was sent first. Without this option no control event is sent; `--date` does
+not force batch assignment or verify Camel's clock.
+A standalone control opens the supplied date as-is. If `--date` is also supplied
+without data types, it is unused. Supported dates are 0001-01-01 through 9999-12-31;
+the final supported date can open and repeat but cannot advance within this range.
 
 `--brokers` overrides `CAMEL_BROKERS` (default `localhost:19092`). Repeat
 `--topic customer=custom.customer` or `--topic batch-date=custom.clock` to override

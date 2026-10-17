@@ -7,6 +7,9 @@ required libraries. It does not contain JBang, a compiler, source files, or test
 The Dockerfile-specific ignore file excludes tests, credentials, and runtime data
 from the build context. Rebuild after changing application code or migrations.
 
+For existing installations, follow the [business-date upgrade procedure](../camel/README.md#upgrade-from-the-date-plus-one-clock)
+before starting a rebuilt image: core startup also applies migration 008.
+
 Run commands from the repository root. First configure the
 local password and start PostgreSQL:
 

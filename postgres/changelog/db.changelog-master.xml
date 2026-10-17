@@ -24,4 +24,10 @@
     <changeSet id="007-camel" author="corebank">
         <sqlFile path="007-camel.sql" relativeToChangelogFile="true"/>
     </changeSet>
+    <changeSet id="008-active-business-date" author="corebank">
+        <sqlFile path="008-active-business-date.sql" relativeToChangelogFile="true" splitStatements="false"/>
+    </changeSet>
+    <changeSet id="009-receipt-staged-at" author="corebank">
+        <sqlFile path="009-receipt-staged-at.sql" relativeToChangelogFile="true"/>
+    </changeSet>
 </databaseChangeLog>

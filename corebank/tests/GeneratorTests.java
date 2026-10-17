@@ -26,6 +26,8 @@
 //FILES db/changelog/005-balance-output.sql=../../postgres/changelog/005-balance-output.sql
 //FILES db/changelog/006-batch-jobs.sql=../../postgres/changelog/006-batch-jobs.sql
 //FILES db/changelog/007-camel.sql=../../postgres/changelog/007-camel.sql
+//FILES db/changelog/008-active-business-date.sql=../../postgres/changelog/008-active-business-date.sql
+//FILES db/changelog/009-receipt-staged-at.sql=../../postgres/changelog/009-receipt-staged-at.sql
 
 import org.junit.platform.console.ConsoleLauncher;
 import liquibase.integration.spring.SpringLiquibase;

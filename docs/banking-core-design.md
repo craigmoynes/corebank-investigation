@@ -1,6 +1,6 @@
 # Corebank Investigation — Design
 
-Status: PostgreSQL Compose configuration, a Java 21 / Spring Boot 3.4.4 application launched with JBang, YAML configuration, and initial banking records are implemented. Spring Batch readers for all four input record types and a Unicode-aware tokenizer are implemented and tested. PostgreSQL staging tables and explicit command-line ingestion are implemented. Operational tables are implemented through Liquibase. Batch business validation, posting, output snapshots, and balance-file generation are implemented; trigger monitoring is implemented; Camel topic provisioning, ingestion, closed-date extraction, and balance publication are implemented. Updated 2026-10-16.
+Status: PostgreSQL Compose configuration, a Java 21 / Spring Boot 3.4.4 application launched with JBang, YAML configuration, and initial banking records are implemented. Spring Batch readers for all four input record types and a Unicode-aware tokenizer are implemented and tested. PostgreSQL staging tables and explicit command-line ingestion are implemented. Operational tables are implemented through Liquibase. Batch business validation, posting, output snapshots, and balance-file generation are implemented; trigger monitoring is implemented; Camel topic provisioning, ingestion, closed-date extraction, and balance publication are implemented. Updated 2026-10-17.
 
 ## Purpose and scope
 
@@ -208,15 +208,17 @@ Source topics contain real-time records. A separate control topic carries dates.
 
 Confirmed assignment rule:
 
-**Assigned batch date = latest received control-topic date + one calendar day.**
+**Assigned batch date = the active business date supplied by the latest applied control event.**
+
+Updated 2026-10-17: this supersedes the original date-plus-one convention.
 
 This is driven by the control message, not by the host's current date.
 
 | Event | Intended result |
 | --- | --- |
-| Control topic receives `2026-10-08` | Active assignment date becomes `2026-10-09` |
+| First control event is `2026-10-09` | Open `2026-10-09`; no previous batch is closed |
 | Data messages arrive | Camel stages them in `camel_ingest` with `batch_date = 2026-10-09` |
-| Control topic receives `2026-10-09` | Active assignment date becomes `2026-10-10`; the preceding batch can be closed |
+| Next control event is `2026-10-10` | Close `2026-10-09` and open `2026-10-10` atomically |
 | Further data messages arrive | Camel stages them with `batch_date = 2026-10-10` |
 
 Camel continuously writes to database tables. It does not continuously append directly to the final core input files. Once a day, a separate extraction step selects a closed batch date and generates the four fixed-width input files.
@@ -226,7 +228,8 @@ Recommended interpretation, accepted as the working design: assign the batch dat
 Recommended recovery behaviour:
 
 - Persist the active business date across restarts.
-- Wait for an initial control date before assigning data records.
+- Initialize only from an explicit first clock event; wait before assigning data records.
+- Never reset the clock on restart or infer it from wall time or a data record.
 - Treat a repeated control date as a no-op.
 - Preserve each record's original batch assignment when retrying.
 - Retain source topic, partition, and offset as ingestion identity and traceability metadata.
@@ -530,7 +533,9 @@ operator review. No automatic business/metadata crash-state recovery is attempte
 This section supersedes earlier statements that Camel is future work. Topic naming
 was confirmed during implementation: `system.batch-date`, `input.customer`,
 `input.account`, `input.relationship`, `input.transaction`, and `output.balance`.
-The existing confirmed date rule remains control date + one calendar day.
+The initial date-plus-one rule was superseded on 2026-10-17 by active-business-date
+semantics. Migration 008 preserves the existing open batch and historical assignments.
+See the [initialization and upgrade runbook](../camel/README.md#upgrade-from-the-date-plus-one-clock).
 
 Working implementation assumptions for previously open decisions:
 
@@ -544,7 +549,7 @@ Working implementation assumptions for previously open decisions:
   output publication hashes. Four named views expose the staged record types over
   shared storage. Validation produces the existing fixed-width Unicode contract.
 - Clock-row locking serializes date changes with record assignment. Dates repeat or
-  advance one day; new backward/skipped controls fail. An original source replay is
+  advance to any later date; new backward controls fail and skipped dates create no batches. An original source replay is
   recognized before date validation and keeps its original assignment. New records
   wait for initialization. Reference upserts use the latest source offset, while
   conflicting transaction IDs within a date fail.
@@ -561,3 +566,7 @@ Working implementation assumptions for previously open decisions:
 Full contracts, configuration, limitations, and tests are in
 [the Camel runbook](../camel/README.md). The tests use a disposable PostgreSQL DB and
 Redpanda broker, including the existing core's reader/posting/export implementations.
+
+Receipt migration 009 adds a database insertion timestamp (`staged_at`), preserved
+on replay and NULL for historical receipts. See the [weekend cutoff example](../README.md#business-dates-and-a-weekend-cutoff)
+for business-date assignment across a forward jump.

@@ -29,13 +29,13 @@ public class BankingTest {
         store=new Store(settings); files=new FilesBridge(store,settings);
         try (var db=settings.connect(); var s=db.createStatement()) {
             s.execute("TRUNCATE camel_ingest.record,camel_ingest.receipt,camel_ingest.batch,camel_ingest.publication");
-            s.execute("UPDATE camel_ingest.clock SET control_date=NULL");
+            s.execute("UPDATE camel_ingest.clock SET active_date=NULL");
         }
         Files.createDirectories(settings.output());
     }
     Store.Source source(String topic,long offset,String key,String value) { return new Store.Source(topic,0,offset,key,value); }
     LocalDate date(long offset,String value) throws Exception { return store.accept(source(Topics.DATE,offset,"clock",value)); }
-    void initial() throws Exception { date(0,"2026-10-08"); }
+    void initial() throws Exception { date(0,"2026-10-09"); }
     void stageAll() throws Exception {
         store.accept(source("input.customer",0,"1",CUSTOMER)); store.accept(source("input.account",0,"2",ACCOUNT));
         store.accept(source("input.relationship",0,"2:1",RELATIONSHIP)); store.accept(source("input.transaction",0,"3",TRANSACTION));
@@ -44,23 +44,138 @@ public class BankingTest {
     @Test void requiresInitialDateAndPersistsClock() throws Exception {
         assertThrows(Store.AwaitingClock.class,() -> store.accept(source("input.account",0,"2",ACCOUNT)));
         assertEquals(0,scalar("SELECT count(*) FROM camel_ingest.receipt"));
-        assertEquals(DAY,date(0,"2026-10-08"));
+        assertEquals(DAY,date(0,"2026-10-09"));
         assertEquals(DAY,new Store(settings).accept(source("input.account",0,"2",ACCOUNT)));
     }
-    @Test void datesRepeatAdvanceRejectGapsAndReplay() throws Exception {
-        initial(); assertEquals(DAY,date(1,"2026-10-08"));
-        assertThrows(IllegalArgumentException.class,() -> date(2,"2026-10-10"));
+    @Test void firstDateOpensOnlyThatDateAndRestartDoesNotResetIt() throws Exception {
+        assertEquals(DAY,date(0,DAY.toString()));
+        assertEquals(1,scalar("SELECT count(*) FROM camel_ingest.batch"));
+        assertEquals(0,scalar("SELECT count(*) FROM camel_ingest.batch WHERE closed"));
+        assertFalse(files.extractNextClosedBatchIfAvailable());
+        stageAll();
+        assertEquals(DAY.plusDays(1),date(1,DAY.plusDays(1).toString()));
+        assertEquals(DAY.plusDays(1),new Store(settings).accept(source("input.account",1,"2",ACCOUNT)));
+        assertEquals(4,scalar("SELECT count(*) FROM camel_ingest.record WHERE batch_date=DATE '2026-10-09'"));
+        assertEquals(1,scalar("SELECT count(*) FROM camel_ingest.record WHERE batch_date=DATE '2026-10-10'"));
+        assertTrue(files.extractNextClosedBatchIfAvailable());
+    }
+    @Test void finalSupportedDateCanInitializeAndRepeat() throws Exception {
+        assertEquals(LocalDate.of(9999,12,31),date(0,"9999-12-31"));
+        assertEquals(LocalDate.of(9999,12,31),date(1,"9999-12-31"));
+        assertThrows(IllegalArgumentException.class,() -> date(2,"+10000-01-01"));
+    }
+    String activeDateMigration() throws Exception {
+        try(var stream=getClass().getResourceAsStream("/db/changelog/008-active-business-date.sql")) {
+            return new String(Objects.requireNonNull(stream).readAllBytes(),java.nio.charset.StandardCharsets.UTF_8);
+        }
+    }
+    @Test void legacyMigrationPreservesOpenBatchAndOriginalReceipts() throws Exception {
+        initial(); stageAll();
+        try(var db=settings.connect();var s=db.createStatement()) {
+            db.setAutoCommit(false);
+            s.execute("ALTER TABLE camel_ingest.clock RENAME COLUMN active_date TO control_date");
+            s.execute("UPDATE camel_ingest.clock SET control_date=DATE '2026-10-08'");
+            s.execute("UPDATE camel_ingest.receipt SET payload='2026-10-08' WHERE topic='system.batch-date'");
+            s.execute(activeDateMigration());
+            db.commit();
+        }
+        assertEquals(DAY,date(0,"2026-10-08")); // already handled legacy event retains its assignment
+        assertEquals(DAY,store.accept(source("input.account",0,"2",ACCOUNT)));
+        assertEquals(DAY,new Store(settings).accept(source("input.account",1,"2",ACCOUNT)));
+        assertThrows(IllegalArgumentException.class,() -> date(1,"2026-10-08")); // unhandled old event is not guessed
+        assertEquals(DAY,date(1,"2026-10-09"));
+        assertEquals(DAY.plusDays(1),date(2,"2026-10-10"));
+        assertEquals(4,scalar("SELECT count(*) FROM camel_ingest.record WHERE batch_date=DATE '2026-10-09'"));
+    }
+    @Test void migrationKeepsFreshClockNullAndRejectsInconsistentLegacyState() throws Exception {
+        try(var db=settings.connect();var s=db.createStatement()) {
+            db.setAutoCommit(false);
+            s.execute("ALTER TABLE camel_ingest.clock RENAME COLUMN active_date TO control_date");
+            s.execute(activeDateMigration());
+            try(var r=s.executeQuery("SELECT active_date FROM camel_ingest.clock")) {
+                assertTrue(r.next()); assertNull(r.getObject(1));
+            }
+            db.rollback();
+            s.execute("ALTER TABLE camel_ingest.clock RENAME COLUMN active_date TO control_date");
+            s.execute("UPDATE camel_ingest.clock SET control_date=DATE '2026-10-08'");
+            assertThrows(java.sql.SQLException.class,() -> s.execute(activeDateMigration()));
+            db.rollback();
+        }
+        assertEquals(0,scalar("SELECT count(*) FROM camel_ingest.batch"));
+        assertEquals(DAY,date(0,DAY.toString()));
+    }
+    @Test void migrationRefusesRunningCamelLease() throws Exception {
+        try(var lease=settings.connect();var lock=lease.createStatement();
+            var db=settings.connect();var s=db.createStatement()) {
+            lock.execute("SELECT pg_advisory_lock(64019,0)");
+            db.setAutoCommit(false);
+            s.execute("ALTER TABLE camel_ingest.clock RENAME COLUMN active_date TO control_date");
+            var error=assertThrows(java.sql.SQLException.class,() -> s.execute(activeDateMigration()));
+            assertTrue(error.getMessage().contains("Stop Camel"));
+            db.rollback();
+        }
+    }
+    @Test void racingInputAndTransitionKeepOneOriginalAssignment() throws Exception {
+        initial();
+        try(var pool=Executors.newVirtualThreadPerTaskExecutor()) {
+            for(int i=0;i<10;i++) {
+                LocalDate before=DAY.plusDays(i), after=before.plusDays(1);
+                long offset=i;
+                var start=new CountDownLatch(1);
+                var input=source("input.account",offset,"2",ACCOUNT);
+                var staged=pool.submit(() -> { start.await(); return store.accept(input); });
+                var advanced=pool.submit(() -> { start.await(); return date(offset+1,after.toString()); });
+                start.countDown();
+                LocalDate assigned=staged.get(5,TimeUnit.SECONDS);
+                assertEquals(after,advanced.get(5,TimeUnit.SECONDS));
+                assertTrue(assigned.equals(before) || assigned.equals(after));
+                assertEquals(assigned,store.accept(input));
+                assertEquals(1,scalar("SELECT count(*) FROM camel_ingest.batch WHERE batch_date=DATE '"+before+"' AND closed"));
+                assertEquals(1,scalar("SELECT count(*) FROM camel_ingest.batch WHERE NOT closed"));
+            }
+        }
+    }
+    @Test void datesRepeatAdvanceRejectBackwardAndReplay() throws Exception {
+        initial(); assertEquals(DAY,date(1,"2026-10-09"));
         assertThrows(IllegalArgumentException.class,() -> date(2,"2026-10-07"));
-        assertEquals(DAY.plusDays(1),date(2,"2026-10-09"));
-        assertEquals(DAY,date(0,"2026-10-08")); // old source replay is recognized before backward-date validation
+        assertEquals(DAY.plusDays(1),date(2,"2026-10-10"));
+        assertEquals(DAY,date(0,"2026-10-09")); // old source replay is recognized before backward-date validation
         assertEquals(1,scalar("SELECT count(*) FROM camel_ingest.batch WHERE closed"));
         assertThrows(java.time.DateTimeException.class,() -> date(3,"2026-02-30"));
+    }
+    @Test void weekendJumpClosesSaturdayWithoutCreatingSundayAndPreservesStagingTime() throws Exception {
+        date(0,"2026-10-16");
+        date(1,"2026-10-17");
+        var input=source("input.account",0,"2",ACCOUNT);
+        assertEquals(LocalDate.of(2026,10,17),store.accept(input));
+        java.time.OffsetDateTime staged;
+        try(var db=settings.connect();var s=db.createStatement();var r=s.executeQuery(
+            "SELECT staged_at FROM camel_ingest.receipt WHERE topic='input.account'")) {
+            assertTrue(r.next()); staged=r.getObject(1,java.time.OffsetDateTime.class); assertNotNull(staged);
+        }
+        assertEquals(LocalDate.of(2026,10,19),date(2,"2026-10-19"));
+        assertEquals(LocalDate.of(2026,10,19),date(3,"2026-10-19"));
+        assertThrows(IllegalArgumentException.class,() -> date(4,"2026-10-18"));
+        assertEquals(0,scalar("SELECT count(*) FROM camel_ingest.batch WHERE batch_date=DATE '2026-10-18'"));
+        assertEquals(1,scalar("SELECT count(*) FROM camel_ingest.batch WHERE NOT closed"));
+        assertEquals(LocalDate.of(2026,10,17),store.accept(input));
+        try(var db=settings.connect();var s=db.createStatement();var r=s.executeQuery(
+            "SELECT staged_at FROM camel_ingest.receipt WHERE topic='input.account'")) {
+            assertTrue(r.next()); assertEquals(staged,r.getObject(1,java.time.OffsetDateTime.class));
+        }
+        assertEquals(LocalDate.of(2026,10,19),store.accept(source("input.account",1,"2",ACCOUNT)));
+        assertTrue(files.extractNextClosedBatchIfAvailable()); // Friday
+        assertTrue(files.extractNextClosedBatchIfAvailable()); // weekend stays Saturday
+        assertTrue(Files.exists(settings.input().resolve("batch_20261017.trg")));
+        assertTrue(Files.size(settings.input().resolve("account_20261017.dat"))>0);
+        assertFalse(Files.exists(settings.input().resolve("batch_20261018.trg")));
+        assertFalse(files.extractNextClosedBatchIfAvailable());
     }
     @Test void redeliveryKeepsOriginalDateAndDoesNotRevertNewerUpsert() throws Exception {
         initial(); store.accept(source("input.customer",0,"1",CUSTOMER));
         store.accept(source("input.customer",1,"1",CUSTOMER.replace("José","Jane")));
         store.accept(source("input.customer",0,"1",CUSTOMER));
-        date(1,"2026-10-09");
+        date(1,"2026-10-10");
         assertEquals(DAY,store.accept(source("input.customer",0,"1",CUSTOMER)));
         assertEquals(1,scalar("SELECT count(*) FROM camel_ingest.customer"));
         assertEquals(1,scalar("SELECT count(*) FROM camel_ingest.customer WHERE fixed_line LIKE '%Jane%'"));
@@ -86,7 +201,7 @@ public class BankingTest {
         assertThrows(Exception.class,() -> Records.decode("account",ACCOUNT.replace("\"accountId\":2","\"accountId\":2,\"accountId\":3")));
     }
     @Test void closedExtractionAndCoreRoundTrip() throws Exception {
-        initial(); stageAll(); assertFalse(files.extractNextClosedBatchIfAvailable()); date(1,"2026-10-09");
+        initial(); stageAll(); assertFalse(files.extractNextClosedBatchIfAvailable()); date(1,"2026-10-10");
         assertTrue(files.extractNextClosedBatchIfAvailable()); assertFalse(files.extractNextClosedBatchIfAvailable());
         assertTrue(Files.exists(settings.input().resolve("batch_20261009.trg")));
         try (var db=settings.connect(); var s=db.createStatement()) {
@@ -103,7 +218,7 @@ public class BankingTest {
         assertEquals(0,files.publishPendingBalanceFiles((k,v) -> fail("Already published")));
     }
     @Test void extractionConflictDoesNotSignalReadyAndRecovers() throws Exception {
-        initial(); date(1,"2026-10-09"); Files.createDirectories(settings.input());
+        initial(); date(1,"2026-10-10"); Files.createDirectories(settings.input());
         Path conflict=settings.input().resolve("account_20261009.dat"); Files.writeString(conflict,"conflict");
         assertThrows(Exception.class,files::extractNextClosedBatchIfAvailable);
         assertFalse(Files.exists(settings.input().resolve("batch_20261009.trg")));
@@ -138,7 +253,7 @@ public class BankingTest {
             db.setAutoCommit(false);
             try(var s=db.createStatement()) { s.execute("SELECT * FROM camel_ingest.clock FOR UPDATE"); }
             try(var pool=Executors.newVirtualThreadPerTaskExecutor()) {
-                var pending=pool.submit(() -> date(1,"2026-10-09"));
+                var pending=pool.submit(() -> date(1,"2026-10-10"));
                 Thread.sleep(150); assertFalse(pending.isDone());
                 db.commit(); assertEquals(DAY.plusDays(1),pending.get(5,TimeUnit.SECONDS));
             }
@@ -156,13 +271,13 @@ public class BankingTest {
             context.addRoutes(new BankingRoutes(settings)); context.start();
             Thread.sleep(2000);
             assertEquals(0,scalar("SELECT count(*) FROM camel_ingest.receipt"));
-            producer.send(new ProducerRecord<>(Topics.DATE,"clock","2026-10-08")).get();
+            producer.send(new ProducerRecord<>(Topics.DATE,"clock","2026-10-09")).get();
             await(() -> scalar("SELECT count(*) FROM camel_ingest.account")==1);
             producer.send(new ProducerRecord<>("input.customer","1",CUSTOMER)).get();
             producer.send(new ProducerRecord<>("input.relationship","2:1",RELATIONSHIP)).get();
             producer.send(new ProducerRecord<>("input.transaction","3",TRANSACTION)).get();
             await(() -> scalar("SELECT count(*) FROM camel_ingest.record")==4);
-            producer.send(new ProducerRecord<>(Topics.DATE,"clock","2026-10-09")).get();
+            producer.send(new ProducerRecord<>(Topics.DATE,"clock","2026-10-10")).get();
             await(() -> Files.exists(settings.input().resolve("batch_20261009.trg")));
             Files.writeString(settings.output().resolve("balance_20261009.dat"),String.format("%19d%20d\n",2,12345));
             consumer.subscribe(List.of(Topics.BALANCE));
