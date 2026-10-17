@@ -2,6 +2,8 @@
 
 Java 21 / JBang, Apache Camel 4.18.0, PostgreSQL, and a Kafka-compatible broker.
 The core remains a separate file-based application. Run commands from the repository root.
+See the [project quick start](../README.md), [core guide](../corebank/README.md),
+and [Docker guide](../docker/README.md) for the surrounding runtime.
 
 ## Topic contract
 
@@ -93,6 +95,29 @@ boundary: wait until the intended inputs are staged/acknowledged before sending
 the next control event if you need them in the preceding batch. Even a record
 produced earlier belongs to the new date if it first stages after the transition.
 
+## Check staging before closing a date
+
+From the repository root, open the development database:
+
+```sh
+docker compose -f docker/compose.yaml exec postgres psql -U postgres -d corebank
+```
+
+For the quick-start batch, inspect the clock, batch state, and staged counts:
+
+```sql
+SELECT control_date FROM camel_ingest.clock;
+SELECT * FROM camel_ingest.batch ORDER BY batch_date;
+SELECT kind, count(*) FROM camel_ingest.record
+WHERE batch_date = DATE '2026-10-17' GROUP BY kind ORDER BY kind;
+```
+
+For a fresh `--all` run, expect control date `2026-10-16`, an open October 17
+batch, and ten staged records of each of the four kinds before closing that date.
+For other runs, reconcile the intended business keys and records; reference
+upserts and duplicate records mean counts alone are not always sufficient.
+Use `\q` to exit. Broker acknowledgement alone does not confirm staging.
+
 ## Route and recovery behavior
 
 1. The date route persists its clock and opens/closes batches atomically. A repeated
@@ -171,7 +196,7 @@ source replay after rollover, reference upserts, transaction conflicts, row-lock
 coordination, empty/conflicting files, extraction crash recovery, core
 reader/posting/output round-trip, failed broker publication, actual Camel Kafka
 consumers/producers, and route restart. Existing core tests remain available as
-documented in the repository README.
+documented in the [core guide](../corebank/README.md#tests).
 
 References: [Camel Kafka manual commits](https://camel.apache.org/components/4.18.x/kafka-component.html),
 [Redpanda local development](https://docs.redpanda.com/streaming/current/get-started/quick-start/).
@@ -184,7 +209,7 @@ writes the existing fixed-width format; `banking.KafkaGenerator` serializes thos
 same fields as JSON with exact 64-bit numbers and the topic keys above. Reference
 pools and used IDs still occupy memory; message payloads are not accumulated.
 
-From `implementation/`, with migrated database credentials exported and topics
+From the repository root, with migrated database credentials exported and topics
 provisioned as above:
 
 ```sh
