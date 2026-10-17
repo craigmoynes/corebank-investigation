@@ -92,6 +92,7 @@ class GeneratorTest {
             BankingRecords.Transaction row;
             while ((row = reader.read()) != null) {
                 assertEquals(1, row.accountId());
+                assertEquals(date, row.effectiveDate());
                 n++;
             }
             assertEquals(25, n);

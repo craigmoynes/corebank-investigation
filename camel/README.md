@@ -59,6 +59,10 @@ must follow the [migration procedure](#upgrade-from-the-date-plus-one-clock) bef
 starting either updated application; rebuild the core image to include migrations 008 and 009. Never run a file generator or another
 extractor against the same input date while Camel owns it.
 
+Transaction format migration 010 requires a coordinated deployment of core, Camel,
+and publishers. See [effective-date upgrade instructions](../corebank/README.md#upgrading-transaction-effective-dates)
+for legacy files, pending Kafka events, and existing staging records.
+
 ## Input examples
 
 Use JSON integer numbers for IDs/amounts (not strings, decimals, or floating-point
@@ -67,7 +71,10 @@ all supported IDs exactly. Text is normalized to NFC, measured in code points, a
 space-padded to the core's existing file widths. Unknown fields, duplicate JSON
 properties, tombstones, invalid enums/dates, and invalid numeric ranges are rejected.
 `endDate` may be absent or null. Other fields are required. Customer blank-text
-semantics remain the same as the existing core readers.
+semantics remain the same as the existing core readers. Transactions require an
+`effectiveDate` in `YYYY-MM-DD` format. Camel writes it into positions 65–74 of the
+transaction file; core compares it with the account start date, independently of
+the assigned batch date. It is part of immutable transaction content.
 
 ```json
 {"customerId":1,"firstName":"José","lastName":"Doe","addressLine1":"123 Main St","city":"Toronto","province":"ON","postalCode":"A1B 2C3","country":"Canada"}
@@ -79,7 +86,7 @@ semantics remain the same as the existing core readers.
 {"accountId":2,"customerId":1,"type":"PRIMARY"}
 ```
 ```json
-{"transactionId":3,"accountId":2,"type":"CR","amount":12345}
+{"transactionId":3,"accountId":2,"type":"CR","amount":12345,"effectiveDate":"2026-10-09"}
 ```
 
 Example on a fresh clock with a local `rpk` installation (same broker as `CAMEL_BROKERS`):
@@ -288,7 +295,7 @@ jbang camel/src/KafkaGenerator.java --date=2026-10-17 --transactions=1000
 jbang camel/src/KafkaGenerator.java --date=2026-10-17 --customers=100 --accounts --seed=123 --max-pending=500
 ```
 
-`--date` controls generated account dates and eligibility and is required only
+`--date` controls generated account start dates, transaction effective dates, and eligibility and is required only
 when selecting data record types. `--batch-date` alone publishes the literal
 `system.batch-date` value without starting Spring or connecting to the database.
 With data selected, it must equal `--date`.

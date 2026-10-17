@@ -23,7 +23,7 @@ import java.util.concurrent.Callable;
 @Command(name="file-generator", mixinStandardHelpOptions=true,
     description="Generate four dated fixed-width input files using a read-only database snapshot.")
 public class FileGenerator implements Callable<Integer> {
-    @Option(names="--date", required=true, description="Business date (YYYY-MM-DD).") LocalDate date;
+    @Option(names="--date", required=true, description="File batch date and generated account start / transaction effective date (YYYY-MM-DD).") LocalDate date;
     @Option(names="--all", description="Default all four counts to 10; explicit counts override.") boolean all;
     @Option(names="--customers", arity="0..1", fallbackValue="10", description="Record count; 10 when selected without a value, otherwise omitted types are empty.") Integer customers;
     @Option(names="--accounts", arity="0..1", fallbackValue="10", description="Record count; 10 when selected without a value, otherwise omitted types are empty.") Integer accounts;

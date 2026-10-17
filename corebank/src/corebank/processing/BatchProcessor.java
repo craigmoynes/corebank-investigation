@@ -55,9 +55,9 @@ public final class BatchProcessor {
             counts.put("account", upsert(c, date, "account", "account_id", "start_date,end_date,account_type"));
             counts.put("relationship", upsert(c, date, "relationship", "account_id,customer_id", "type"));
             // Validate against the effective account state after this batch's upserts.
-            reject(c, "SELECT 'Ineligible transaction at ' || t.source_file || ':' || t.source_line FROM core_ingest.transaction t JOIN core.account a USING(account_id) LEFT JOIN core.transaction old USING(transaction_id) WHERE t.batch_date=? AND old.transaction_id IS NULL AND (a.end_date IS NOT NULL OR a.start_date>t.batch_date) LIMIT 1", date);
+            reject(c, "SELECT 'Ineligible transaction at ' || t.source_file || ':' || t.source_line FROM core_ingest.transaction t JOIN core.account a USING(account_id) LEFT JOIN core.transaction old USING(transaction_id) WHERE t.batch_date=? AND old.transaction_id IS NULL AND (a.end_date IS NOT NULL OR a.start_date>t.effective_date) LIMIT 1", date);
             long posted;
-            try (var s = c.prepareStatement("INSERT INTO core.transaction(transaction_id,account_id,type,amount,batch_date,batch_run_id) SELECT t.transaction_id,t.account_id,t.type,t.amount,t.batch_date,? FROM core_ingest.transaction t WHERE t.batch_date=? AND NOT EXISTS (SELECT 1 FROM core.transaction old WHERE old.transaction_id=t.transaction_id)")) {
+            try (var s = c.prepareStatement("INSERT INTO core.transaction(transaction_id,account_id,type,amount,effective_date,batch_date,batch_run_id) SELECT t.transaction_id,t.account_id,t.type,t.amount,t.effective_date,t.batch_date,? FROM core_ingest.transaction t WHERE t.batch_date=? AND NOT EXISTS (SELECT 1 FROM core.transaction old WHERE old.transaction_id=t.transaction_id)")) {
                 s.setLong(1, run); s.setObject(2, date); posted = s.executeLargeUpdate();
             }
             // NUMERIC aggregation avoids intermediate BIGINT overflow. The final cast rejects
@@ -128,7 +128,7 @@ public final class BatchProcessor {
         for (String[] key : keys)
             reject(c, "SELECT 'Duplicate " + key[0] + " business key; first source line ' || min(source_line) FROM core_ingest." + key[0] + " WHERE batch_date=? GROUP BY " + key[1] + " HAVING count(*)>1 LIMIT 1", date);
         reject(c, "SELECT 'Account end date precedes start date at ' || source_file || ':' || source_line FROM core_ingest.account WHERE batch_date=? AND end_date<start_date LIMIT 1", date);
-        reject(c, "SELECT 'Conflicting transaction ID at ' || t.source_file || ':' || t.source_line FROM core_ingest.transaction t JOIN core.transaction old USING(transaction_id) WHERE t.batch_date=? AND (t.account_id,t.type,t.amount) IS DISTINCT FROM (old.account_id,old.type,old.amount) LIMIT 1", date);
+        reject(c, "SELECT 'Conflicting transaction ID at ' || t.source_file || ':' || t.source_line FROM core_ingest.transaction t JOIN core.transaction old USING(transaction_id) WHERE t.batch_date=? AND (t.account_id,t.type,t.amount,t.effective_date) IS DISTINCT FROM (old.account_id,old.type,old.amount,old.effective_date) LIMIT 1", date);
         // Missing references are checked against both existing and same-batch records.
         for (String table : new String[]{"relationship","transaction"})
             reject(c, "SELECT 'Missing account at ' || t.source_file || ':' || t.source_line FROM core_ingest." + table + " t WHERE t.batch_date=? AND NOT EXISTS (SELECT 1 FROM core.account a WHERE a.account_id=t.account_id) AND NOT EXISTS (SELECT 1 FROM core_ingest.account a WHERE a.batch_date=t.batch_date AND a.account_id=t.account_id) LIMIT 1", date);

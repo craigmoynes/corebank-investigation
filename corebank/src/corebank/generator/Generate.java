@@ -36,7 +36,7 @@ public final class Generate {
         if (request.relationships() > availablePairs)
             throw new IllegalArgumentException("Requested " + request.relationships() + " relationships, but only " + availablePairs + " unused account/customer pairs exist. Generate more customers/accounts.");
         if (request.transactions() > 0 && snapshot.eligible.isEmpty() && request.accounts() == 0)
-            throw new IllegalArgumentException("No eligible accounts: transactions require an account with no end date and start_date <= batch date. Include --accounts or populate core first.");
+            throw new IllegalArgumentException("No eligible accounts: transactions require an account with no end date and start_date <= transaction effective date (--date). Include --accounts or populate core first.");
         List<String> first = request.customers() > 0 ? values("firstnames", 10) : List.of();
         List<String> last = request.customers() > 0 ? values("lastnames", 10) : List.of();
         // Reserve five positions for a four-digit house number and its separating space.
@@ -78,8 +78,8 @@ public final class Generate {
                 for (int i=0; i<request.transactions(); i++) {
                     long account=snapshot.eligible.get(random.nextInt(snapshot.eligible.size()));
                     long transaction=id(random,snapshot.transactionIds);
-                    sink.accept(new GeneratedRecord("transaction", Long.toString(transaction), List.of("transactionId","accountId","type","amount"),
-                        List.of(transaction,account,random.nextBoolean()?"CR":"DR",1L+random.nextInt(100000)), List.of(19,19,6,20)));
+                    sink.accept(new GeneratedRecord("transaction", Long.toString(transaction), List.of("transactionId","accountId","type","amount","effectiveDate"),
+                        List.of(transaction,account,random.nextBoolean()?"CR":"DR",1L+random.nextInt(100000),request.date().toString()), List.of(19,19,6,20,10)));
                 }
             }
         };

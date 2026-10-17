@@ -26,8 +26,8 @@ class OperationalSchemaTest {
         assertEquals(state, ex.getSQLState()); db.rollback(save);
     }
     private String transaction(long id, long account, String date) {
-        return "INSERT INTO core.transaction(transaction_id,account_id,type,amount,batch_date,batch_run_id) "
-            + "SELECT " + id + "," + account + ",'CR',12345,'" + date + "',batch_run_id FROM core.batch_run WHERE batch_date='2026-10-09'";
+        return "INSERT INTO core.transaction(transaction_id,account_id,type,amount,effective_date,batch_date,batch_run_id) "
+            + "SELECT " + id + "," + account + ",'CR',12345,'2026-10-09','" + date + "',batch_run_id FROM core.batch_run WHERE batch_date='2026-10-09'";
     }
     @Test void initializesBalanceAndRollsBackWithAccount() throws Exception {
         assertEquals("0", value("SELECT balance FROM core.balance WHERE account_id=901"));
@@ -67,6 +67,29 @@ class OperationalSchemaTest {
         rejected("UPDATE core.transaction SET amount=1 WHERE transaction_id=901", "23514");
         rejected("DELETE FROM core.transaction WHERE transaction_id=901", "23514");
         rejected(transaction(902,901,"2026-10-09").replace("12345", "-1"), "23514");
+    }
+    @Test void enforcesEffectiveDateAtDatabaseBoundary() throws Exception {
+        sql("UPDATE core.account SET start_date='2026-10-10' WHERE account_id=901");
+        rejected(transaction(901,901,"2026-10-09"), "23514");
+        sql(transaction(901,901,"2026-10-09").replace("12345,'2026-10-09'", "12345,'2026-10-10'"));
+        assertEquals("2026-10-10",value("SELECT effective_date FROM core.transaction WHERE transaction_id=901"));
+        rejected("UPDATE core.transaction SET effective_date='2026-10-11' WHERE transaction_id=901", "23514");
+        rejected(transaction(902,901,"2026-10-09").replace("12345,'2026-10-09'", "12345,NULL"), "23502");
+    }
+    @Test void migrationBackfillsLegacyDatesWithoutChangingLedgerOrAudit() throws Exception {
+        sql(transaction(901,901,"2026-10-09"));
+        String created=value("SELECT created_at FROM core.transaction WHERE transaction_id=901");
+        sql("INSERT INTO core_ingest.transaction VALUES ('2026-10-09','t.dat',1,902,901,'CR',100,'2026-10-09')");
+        sql("ALTER TABLE core.transaction DROP COLUMN effective_date");
+        sql("ALTER TABLE core_ingest.transaction DROP COLUMN effective_date");
+        try(var stream=getClass().getResourceAsStream("/db/changelog/010-transaction-effective-date.sql")) {
+            sql(new String(java.util.Objects.requireNonNull(stream).readAllBytes(),java.nio.charset.StandardCharsets.UTF_8));
+        }
+        assertEquals("2026-10-09",value("SELECT effective_date FROM core.transaction WHERE transaction_id=901"));
+        assertEquals("2026-10-09",value("SELECT effective_date FROM core_ingest.transaction WHERE transaction_id=902"));
+        assertEquals("12345",value("SELECT amount FROM core.transaction WHERE transaction_id=901"));
+        assertEquals(created,value("SELECT created_at FROM core.transaction WHERE transaction_id=901"));
+        rejected("UPDATE core.transaction SET effective_date='2026-10-10' WHERE transaction_id=901", "23514");
     }
     @Test void retainsFailedAttemptsAndPreventsDuplicateSuccessfulDates() throws Exception {
         rejected("INSERT INTO core.batch_run(batch_date) VALUES('2026-10-09')", "23505");

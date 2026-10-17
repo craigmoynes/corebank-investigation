@@ -45,10 +45,10 @@ public final class Records {
                 yield new Row(account+":"+customer,num(account,19)+num(customer,19)+field(choice(n,"type","PRIMARY","SECONDARY"),9));
             }
             case "transaction" -> {
-                fields(n,"transactionId","accountId","type","amount");
+                fields(n,"transactionId","accountId","type","amount","effectiveDate");
                 long id = number(n,"transactionId",true);
                 yield new Row(""+id,num(id,19)+num(number(n,"accountId",true),19)+field(choice(n,"type","CR","DR"),6)
-                    +num(number(n,"amount",false),20));
+                    +num(number(n,"amount",false),20)+date(text(n,"effectiveDate")).toString());
             }
             default -> throw new IllegalArgumentException("Unknown kind: "+kind);
         };

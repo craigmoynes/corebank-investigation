@@ -86,7 +86,7 @@ Each record is **47 positions**. Business key: `accountId`.
 
 Processing checks that an end date does not precede the start date. New
 transactions require an account with no end date and a start date on or before
-the batch date. Account records supply full values, not partial updates.
+the transaction effective date. Account records supply full values, not partial updates.
 
 ### Relationship input: `relationship_YYYYMMDD.dat`
 
@@ -103,7 +103,7 @@ provided in the same batch. Each pair has one relationship type.
 
 ### Transaction input: `transaction_YYYYMMDD.dat`
 
-Each record is **64 positions**. Business key: `transactionId`.
+Each record is **74 positions**. Business key: `transactionId`.
 
 | Field | Positions | Width | Format |
 | --- | --- | --- | --- |
@@ -111,6 +111,7 @@ Each record is **64 positions**. Business key: `transactionId`.
 | `accountId` | 20–38 | 19 | Positive decimal account ID |
 | `type` | 39–44 | 6 | `CR` or `DR`, space-padded |
 | `amount` | 45–64 | 20 | Unsigned integer cents, 0–9223372036854775807 |
+| `effectiveDate` | 65–74 | 10 | Required valid calendar date, `YYYY-MM-DD`, years 0001–9999 |
 
 `CR` adds the amount to the account balance; `DR` subtracts it. The amount itself
 has no sign. Transaction IDs are globally immutable: an identical replay on a
@@ -118,6 +119,14 @@ later batch date does not post again; changed contents for an existing ID fail.
 Duplicate business keys within any one input file fail processing, even if their
 contents match. Cross-record references and business rules are checked during
 processing, after individual records have been parsed and staged.
+
+A transaction's `effectiveDate` must be on or after the account's `startDate`.
+It may be earlier or later than the batch date: the batch identifies the processing
+group, not when the transaction takes effect. For example, a Sunday-effective
+transaction against an account opened Sunday can belong to Saturday's still-open
+batch, processed on Monday. Balances still change only when that batch processes;
+there is no deferred-posting scheduler for future effective dates. Changing the
+effective date of an existing transaction ID is a conflicting replay.
 
 ### Balance output: `balance_YYYYMMDD.dat`
 
@@ -167,9 +176,9 @@ All readers use 19-position IDs and enforce values from 1 through Long.MAX_VALUE
 Use AccountFileReader.create(path) for the 47-position account format.
 
 RelationshipFileReader.create(path) reads 47-position records;
-TransactionFileReader.create(path) reads 64-position records, including a
-20-position nonnegative-cent amount. All amounts must fit in a Java long.
-The reader suite currently contains 62 tests.
+TransactionFileReader.create(path) reads 74-position records, including a
+20-position nonnegative-cent amount and a required ten-position effective date. All amounts must fit in a Java long.
+The reader suite covers the layouts and validation rules below.
 
 ## Monitor trigger files
 
@@ -325,9 +334,9 @@ All operational changes, the dated balance snapshot, and successful batch comple
 error they roll back, and the attempt is recorded as FAILED with zero applied
 counts and a diagnostic. Correct the inputs, re-ingest, and retry a failed date.
 Duplicate business keys within a file fail the whole batch. Transaction IDs are
-globally unique: identical account/type/amount replays are skipped, even on later
+globally unique: identical account/type/amount/effective-date replays are skipped, even on later
 dates; conflicting contents fail. Corrections require a new reversing transaction.
-Any end date, or a start date after the batch date, prohibits new transactions.
+Any end date, or an account start date after the transaction effective date, prohibits new transactions.
 The final net balance must fit signed BIGINT cents; overflow fails the batch.
 
 A retry of a COMPLETED date returns its stored counts without applying changes.
@@ -433,7 +442,7 @@ Run --help for options. Generation does not migrate, insert, or update database 
 The generator reads a consistent read-only PostgreSQL snapshot. Customers/accounts
 created within the batch join the reference pools; relationships avoid existing
 core account/customer pairs. Transactions use only accounts whose end_date is null
-and start_date is on/before the requested date, plus newly generated accounts.
+and start_date is on/before the requested effective date, plus newly generated accounts.
 Relationships may refer to any existing account; the end-date prohibition applies
 to transactions. Missing references or insufficient unused pairs fail before data
 files are written. Customer data uses bounded synthetic examples, including Unicode.
@@ -565,3 +574,30 @@ The launcher applies Liquibase first. Six tests cover self-contained generation
 through the real readers/ingestor, existing-account eligibility, empty files,
 missing references, relationship exhaustion, reproducibility, overwrite protection,
 and Unicode formatting/argument validation.
+
+## Upgrading transaction effective dates
+
+Migration 010 adds required `effective_date` columns to `core_ingest.transaction`
+and `core.transaction`, and enforces account-start eligibility in both core
+processing and the database insert trigger. Existing database rows are backfilled
+from their `batch_date` to preserve the old interpretation; this is not a recovery
+of their actual event dates. Ledger amounts and balances are not changed. The
+existing rule rejecting all new transactions on end-dated accounts remains.
+
+Stop publishers, Camel, the core watcher, and manual stage commands before starting
+an updated launcher or rebuilt image. Deploy the updated core, Camel, and generators
+together. New transaction files require 74 positions and JSON requires
+`effectiveDate`; legacy 64-position files and unreceipted JSON without that field
+are rejected. Drain or explicitly reconcile old Kafka backlog before upgrading.
+Already-receipted Kafka events remain safe to replay because receipt lookup occurs
+before decoding; their stored payloads are not rewritten.
+
+Migration appends the legacy batch date to 64-position Camel transaction records
+in batches not yet extracted. Extracted Camel records and files already on disk
+are left unchanged. Reconcile any partially published extraction before migration.
+Before retrying an old failed batch, prepare its files in the new format with
+reviewed effective dates and follow the existing retry procedure. Do not assume
+migration fixes a failed batch containing later-starting accounts: its legacy
+backfill still uses the old batch date. Preserve completed files and audit records;
+do not simply re-date or republish historical transactions. There is no default
+for new database inserts: callers must supply an effective date.

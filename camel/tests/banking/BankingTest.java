@@ -21,7 +21,7 @@ public class BankingTest {
     static final String CUSTOMER="{\"customerId\":1,\"firstName\":\"José\",\"lastName\":\"Doe\",\"addressLine1\":\"123 Main\",\"city\":\"Toronto\",\"province\":\"ON\",\"postalCode\":\"A1B 2C3\",\"country\":\"Canada\"}";
     static final String ACCOUNT="{\"accountId\":2,\"startDate\":\"2026-10-09\",\"endDate\":null,\"accountType\":\"CHECKING\"}";
     static final String RELATIONSHIP="{\"accountId\":2,\"customerId\":1,\"type\":\"PRIMARY\"}";
-    static final String TRANSACTION="{\"transactionId\":3,\"accountId\":2,\"type\":\"CR\",\"amount\":12345}";
+    static final String TRANSACTION="{\"transactionId\":3,\"accountId\":2,\"type\":\"CR\",\"amount\":12345,\"effectiveDate\":\"2026-10-09\"}";
     static final LocalDate DAY=LocalDate.of(2026,10,9);
     @BeforeEach void setup() throws Exception {
         settings=new Settings(System.getenv().getOrDefault("CAMEL_TEST_BROKERS","localhost:39092"),"test-"+UUID.randomUUID(),
@@ -184,6 +184,7 @@ public class BankingTest {
     @Test void conflictingTransactionsAndKeysRollback() throws Exception {
         initial(); store.accept(source("input.transaction",0,"3",TRANSACTION));
         assertThrows(IllegalArgumentException.class,() -> store.accept(source("input.transaction",1,"3",TRANSACTION.replace("12345","999"))));
+        assertThrows(IllegalArgumentException.class,() -> store.accept(source("input.transaction",1,"3",TRANSACTION.replace("2026-10-09","2026-10-10"))));
         assertThrows(IllegalArgumentException.class,() -> store.accept(source("input.account",0,"wrong",ACCOUNT)));
         assertEquals(2,scalar("SELECT count(*) FROM camel_ingest.receipt"));
     }
@@ -194,6 +195,9 @@ public class BankingTest {
         assertThrows(Exception.class,() -> Records.decode("transaction",TRANSACTION.replace("12345","1.5")));
         assertThrows(Exception.class,() -> Records.decode("transaction",TRANSACTION.replace("12345","-1")));
         assertThrows(Exception.class,() -> Records.decode("transaction",TRANSACTION+" {}"));
+        assertThrows(Exception.class,() -> Records.decode("transaction",TRANSACTION.replace(",\"effectiveDate\":\"2026-10-09\"","")));
+        assertThrows(Exception.class,() -> Records.decode("transaction",TRANSACTION.replace("2026-10-09","2026-02-30")));
+        assertThrows(Exception.class,() -> Records.decode("transaction",TRANSACTION.replace("2026-10-09","0000-01-01")));
         assertThrows(Exception.class,() -> Records.decode("customer",CUSTOMER.replace("José","longerthan10letters")));
         assertThrows(Exception.class,() -> Records.decode("customer",CUSTOMER.replace("José","Jo\\nse")));
         assertThrows(Exception.class,() -> Records.decode("account",ACCOUNT.replace("2026-10-09","2026-02-30")));
@@ -201,7 +205,12 @@ public class BankingTest {
         assertThrows(Exception.class,() -> Records.decode("account",ACCOUNT.replace("\"accountId\":2","\"accountId\":2,\"accountId\":3")));
     }
     @Test void closedExtractionAndCoreRoundTrip() throws Exception {
-        initial(); stageAll(); assertFalse(files.extractNextClosedBatchIfAvailable()); date(1,"2026-10-10");
+        initial();
+        store.accept(source("input.customer",0,"1",CUSTOMER));
+        store.accept(source("input.account",0,"2",ACCOUNT.replace("2026-10-09","2026-10-10")));
+        store.accept(source("input.relationship",0,"2:1",RELATIONSHIP));
+        store.accept(source("input.transaction",0,"3",TRANSACTION.replace("2026-10-09","2026-10-10")));
+        assertFalse(files.extractNextClosedBatchIfAvailable()); date(1,"2026-10-12");
         assertTrue(files.extractNextClosedBatchIfAvailable()); assertFalse(files.extractNextClosedBatchIfAvailable());
         assertTrue(Files.exists(settings.input().resolve("batch_20261009.trg")));
         try (var db=settings.connect(); var s=db.createStatement()) {

@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class KafkaGeneratorTests {
     static GeneratedRecord record() { return new GeneratedRecord("transaction","9223372036854775807",
-        List.of("transactionId","accountId","type","amount"),List.of(Long.MAX_VALUE,1L,"CR",123L),List.of(19,19,6,20)); }
+        List.of("transactionId","accountId","type","amount","effectiveDate"),List.of(Long.MAX_VALUE,1L,"CR",123L,"2026-10-09"),List.of(19,19,6,20,10)); }
     static MockProducer<String,String> producer(boolean auto) {
         return new MockProducer<>(auto,null,new StringSerializer(),new StringSerializer());
     }

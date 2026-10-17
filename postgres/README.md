@@ -121,3 +121,8 @@ lease or inconsistent clock/batch state. `reset-data.sql` now requires migration
 Migration 009 adds `camel_ingest.receipt.staged_at`. New receipts default to
 `clock_timestamp()` at insertion; old receipts stay NULL rather than receiving an
 invented historical timestamp. Replays retain their original timestamp and date.
+
+Migration 010 adds transaction `effective_date` to staging and the ledger, backfills
+legacy database values from `batch_date`, and enforces account-start eligibility
+on inserts. Stop all writers and follow the [effective-date upgrade procedure](../corebank/README.md#upgrading-transaction-effective-dates)
+before applying it; existing transaction files and publishers also need updating.

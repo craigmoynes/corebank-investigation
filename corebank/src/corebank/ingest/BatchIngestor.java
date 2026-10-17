@@ -87,13 +87,14 @@ public final class BatchIngestor {
                         s.setString(6, r.type().name());
                     }));
             counts.put("transaction", load(connection, date, input.resolve("transaction" + suffix), "transaction",
-                    "transaction_id,account_id,type,amount", 4,
+                    "transaction_id,account_id,type,amount,effective_date", 5,
                     TransactionFileReader.create(input.resolve("transaction" + suffix)),
                     (s, r) -> {
                         s.setLong(4, r.transactionId());
                         s.setLong(5, r.accountId());
                         s.setString(6, r.type().name());
                         s.setLong(7, r.amount());
+                        s.setObject(8, r.effectiveDate());
                     }));
             try (var receipt = connection.prepareStatement("INSERT INTO core_ingest.batch_receipt(batch_date) VALUES (?) ON CONFLICT(batch_date) DO UPDATE SET ingested_at=clock_timestamp()")) {
                 receipt.setObject(1, date);

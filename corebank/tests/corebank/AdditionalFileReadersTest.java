@@ -22,7 +22,7 @@ public class AdditionalFileReadersTest {
         return number(account,19)+number(customer,19)+text(type,9);
     }
     private static String transaction(String id, String account, String type, String amount) {
-        return number(id,19)+number(account,19)+text(type,6)+number(amount,20);
+        return number(id,19)+number(account,19)+text(type,6)+number(amount,20)+"2026-10-09";
     }
     private static <T> T readOne(FlatFileItemReader<T> reader) throws Exception {
         try {
@@ -50,6 +50,7 @@ public class AdditionalFileReadersTest {
         assertEquals(Long.MAX_VALUE,value.accountId());
         assertEquals(type,value.type().name());
         assertEquals(Long.parseLong(amount),value.amount());
+        assertEquals(java.time.LocalDate.of(2026,10,9),value.effectiveDate());
     }
     @ParameterizedTest @ValueSource(strings={"accountZero","accountNegative","customerZero","customerNegative","overflow","type","short","long","control"})
     void rejectsRelationship(String kind) throws Exception {
@@ -64,7 +65,7 @@ public class AdditionalFileReadersTest {
         };
         checkFailure("relationship",kind,line);
     }
-    @ParameterizedTest @ValueSource(strings={"idZero","idNegative","accountZero","accountNegative","idOverflow","type","negativeAmount","plusAmount","decimal","emptyAmount","overflow","twentyDigits","short","long","control"})
+    @ParameterizedTest @ValueSource(strings={"idZero","idNegative","accountZero","accountNegative","idOverflow","type","negativeAmount","plusAmount","decimal","emptyAmount","overflow","twentyDigits","missingDate","invalidDate","zeroYear","short","long","control"})
     void rejectsTransaction(String kind) throws Exception {
         String line=switch(kind) {
             case "idZero" -> transaction("0","1","CR","1");
@@ -78,6 +79,9 @@ public class AdditionalFileReadersTest {
             case "decimal" -> transaction("1","1","CR","1.50");
             case "emptyAmount" -> transaction("1","1","CR","");
             case "overflow" -> transaction("1","1","CR","9223372036854775808");
+            case "missingDate" -> transaction("1","1","CR","1").substring(0,64);
+            case "invalidDate" -> transaction("1","1","CR","1").replace("2026-10-09","2026-02-30");
+            case "zeroYear" -> transaction("1","1","CR","1").replace("2026-10-09","0000-10-09");
             case "twentyDigits" -> transaction("1","1","CR","99999999999999999999");
             default -> transaction("1","1","CR","1");
         };

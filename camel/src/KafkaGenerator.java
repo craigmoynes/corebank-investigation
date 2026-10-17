@@ -29,7 +29,7 @@ import java.util.concurrent.Callable;
 @Command(name="kafka-generator", mixinStandardHelpOptions=true,
     description="Generate JSON Kafka records using a read-only database snapshot.")
 public class KafkaGenerator implements Callable<Integer> {
-    @Option(names="--date", description="Business date (YYYY-MM-DD); required when selecting data record types.") LocalDate date;
+    @Option(names="--date", description="Generated account start / transaction effective date (YYYY-MM-DD); required with data. Does not set Camel batch assignment.") LocalDate date;
     @Option(names="--all", description="Default all four counts to 10; explicit counts override.") boolean all;
     @Option(names="--customers", arity="0..1", fallbackValue="10", description="Record count; 10 when selected without a value, otherwise omitted types are empty.") Integer customers;
     @Option(names="--accounts", arity="0..1", fallbackValue="10", description="Record count; 10 when selected without a value, otherwise omitted types are empty.") Integer accounts;

@@ -72,7 +72,7 @@ The ten-position first name, last name, city, and country fields remain delibera
 | Account | `accountId`, `startDate`, `endDate`, `accountType` | `endDate` optional; AccountType values `SAVINGS`, `CHECKING` supersede A1/A2/A3 and are written in an 8-position field |
 | Customer | `customerId`, `firstName`, `lastName`, `addressLine1`, `city`, `province`, `postalCode`, `country` | All address fields are required and non-null; postalCode width 7; ID width 19 |
 | Relationship | `accountId`, `customerId`, `type` | RelationshipType values `PRIMARY`, `SECONDARY` replace R1/R2/R3 and are written in a 9-position field |
-| Transaction | `transactionId`, `accountId`, `type`, `amount` | Types `CR` (credit), `DR` (debit); amount in cents, width 20; reader accepts 0 through Long.MAX_VALUE |
+| Transaction | `transactionId`, `accountId`, `type`, `amount`, `effectiveDate` | Types `CR` (credit), `DR` (debit); amount in cents, width 20; reader accepts 0 through Long.MAX_VALUE |
 
 `accountid`, `customerid`, and `transactionid` use the ID convention above. Relationships are keyed by (account_id, customer_id), with one type per pair.
 
@@ -108,8 +108,9 @@ The ten-position first name, last name, city, and country fields remain delibera
 | Transaction | accountId | 20–38 | 19 |
 | Transaction | type | 39–44 | 6 |
 | Transaction | amount | 45–64 | 20 |
+| Transaction | effectiveDate | 65–74 | 10 |
 
-RelationshipFileReader.create(path) and TransactionFileReader.create(path) share the same UTF-8/NFC/LF handling and positive-ID validation as the existing readers. Relationship types are PRIMARY/SECONDARY; transaction types are CR/DR. Exact record widths are 47 and 64 code points respectively.
+RelationshipFileReader.create(path) and TransactionFileReader.create(path) share the same UTF-8/NFC/LF handling and positive-ID validation as the existing readers. Relationship types are PRIMARY/SECONDARY; transaction types are CR/DR. Exact record widths are 47 and 74 code points respectively.
 
 The user selected a 20-position transaction amount field. This does not expand the Java long numeric range: values above Long.MAX_VALUE are rejected. Transaction inputs use nonnegative cents, accepting zero and rejecting signs and decimal fractions. Posting adds CR amounts and subtracts DR amounts; resulting balances may be negative. Direct record constructors still permit values that the file readers reject.
 
@@ -418,10 +419,10 @@ This section supersedes earlier statements that validation/posting are unimpleme
 BatchProcessor, invoked with --process=YYYY-MM-DD, validates staged business keys
 and references, upserts customers/accounts/relationships, inserts new transactions,
 and updates balances using CR as addition and DR as subtraction. Transactions are
-immutable: existing IDs with identical account/type/amount are no-ops regardless of
+immutable: existing IDs with identical account/type/amount/effective-date are no-ops regardless of
 incoming batch date; differing contents fail. Duplicate keys within staging fail.
 Reference omissions do not delete operational rows. New transaction accounts must
-have no end date and must start on or before the batch date. Negative balances and
+have no end date and must start on or before the transaction effective date. Negative balances and
 zero amounts are allowed. Numeric aggregation checks the final signed BIGINT balance
 without overflowing intermediate totals. The account trigger initializes balances.
 
@@ -570,3 +571,8 @@ Redpanda broker, including the existing core's reader/posting/export implementat
 Receipt migration 009 adds a database insertion timestamp (`staged_at`), preserved
 on replay and NULL for historical receipts. See the [weekend cutoff example](../README.md#business-dates-and-a-weekend-cutoff)
 for business-date assignment across a forward jump.
+
+Migration 010 adds required transaction effective dates independently of batch dates.
+Effective dates must not precede account opening; any account end date still rejects
+new transactions. Legacy database rows use their old batch date as the compatibility
+value. See the [effective-date upgrade procedure](../corebank/README.md#upgrading-transaction-effective-dates).

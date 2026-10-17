@@ -32,7 +32,7 @@ class BatchProcessorTest {
         sql("INSERT INTO core_ingest.account VALUES ('"+d+"','account.dat',"+id+","+id+",'2026-01-01',NULL,'CHECKING')");
     }
     private void tx(LocalDate d,long line,long id,String type,long amount) throws SQLException {
-        sql("INSERT INTO core_ingest.transaction VALUES ('"+d+"','transaction.dat',"+line+","+id+",2,'"+type+"',"+amount+")");
+        sql("INSERT INTO core_ingest.transaction VALUES ('"+d+"','transaction.dat',"+line+","+id+",2,'"+type+"',"+amount+",'2026-10-09')");
     }
     private void fixture() throws SQLException {
         receipt(day);account(day,2);
@@ -55,6 +55,31 @@ class BatchProcessorTest {
         assertEquals(1L,process(next).get("transaction"));
         assertEquals("80",value("SELECT balance FROM core.balance WHERE account_id=2"));
         assertEquals("2",value("SELECT count(*) FROM core.batch_run"));
+    }
+    @Test void effectiveDateControlsEligibilityIndependentlyOfBatchDateAndReplayIdentity() throws Exception {
+        fixture();tx(day,1,10,"CR",100);
+        sql("UPDATE core_ingest.account SET start_date='2026-10-10'");
+        sql("UPDATE core_ingest.transaction SET effective_date='2026-10-10'");
+        assertEquals(1L,process(day).get("transaction"));
+        assertEquals("2026-10-10",value("SELECT effective_date FROM core.transaction"));
+        assertEquals("2026-10-09",value("SELECT batch_date FROM core.transaction"));
+        assertEquals("100",value("SELECT balance FROM core.balance WHERE account_id=2"));
+        var next=day.plusDays(3);receipt(next);tx(next,1,10,"CR",100);
+        sql("UPDATE core_ingest.transaction SET effective_date='2026-10-11' WHERE batch_date='"+next+"'");
+        assertTrue(assertThrows(SQLException.class,()->process(next)).getMessage().contains("Conflicting transaction"));
+        sql("UPDATE core_ingest.transaction SET effective_date='2026-10-10' WHERE batch_date='"+next+"'");
+        assertEquals(0L,process(next).get("transaction"));
+        assertEquals("100",value("SELECT balance FROM core.balance WHERE account_id=2"));
+    }
+    @Test void rejectsEffectiveDateBeforeStartEvenWhenBatchDateIsLater() throws Exception {
+        fixture();tx(day,1,10,"CR",100);
+        sql("UPDATE core_ingest.account SET start_date='2026-10-08'");
+        sql("UPDATE core_ingest.transaction SET effective_date='2026-10-07'");
+        assertTrue(assertThrows(SQLException.class,()->process(day)).getMessage().contains("Ineligible transaction"));
+        assertEquals("0",value("SELECT count(*) FROM core.transaction"));
+        assertEquals("0",value("SELECT count(*) FROM core.balance"));
+        sql("UPDATE core_ingest.transaction SET effective_date='2026-10-08'");
+        assertEquals(1L,process(day).get("transaction"));
     }
     @Test void upsertsReferencesWithoutResettingBalanceOrDeletingOmittedRows() throws Exception {
         fixture();tx(day,1,10,"CR",100);process(day);
@@ -88,7 +113,7 @@ class BatchProcessorTest {
                 case "customer" -> "customer_id,first_name,last_name,address_line1,city,province,postal_code,country";
                 case "account" -> "account_id,start_date,end_date,account_type";
                 case "relationship" -> "account_id,customer_id,type";
-                default -> "transaction_id,account_id,type,amount";
+                default -> "transaction_id,account_id,type,amount,effective_date";
             };
             sql("INSERT INTO core_ingest."+table+" SELECT batch_date,source_file,99,"+fields+" FROM core_ingest."+table);
             assertTrue(assertThrows(SQLException.class,()->process(day)).getMessage().contains("Duplicate "+table));
@@ -190,7 +215,7 @@ class BatchProcessorTest {
     }
     @Test void outputSupportsLongExtremesAndZeroByteEmptySnapshots() throws Exception {
         fixture();account(day,Long.MAX_VALUE);tx(day,1,10,"DR",Long.MAX_VALUE);tx(day,2,11,"DR",1);
-        sql("INSERT INTO core_ingest.transaction VALUES ('"+day+"','t.dat',3,12,"+Long.MAX_VALUE+",'CR',"+Long.MAX_VALUE+")");
+        sql("INSERT INTO core_ingest.transaction VALUES ('"+day+"','t.dat',3,12,"+Long.MAX_VALUE+",'CR',"+Long.MAX_VALUE+",'2026-10-09')");
         process(day);
         String text=Files.readString(output(day));
         assertEquals("                  2-9223372036854775808\n9223372036854775807 9223372036854775807\n",text);

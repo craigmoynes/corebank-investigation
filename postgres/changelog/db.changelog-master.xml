@@ -30,4 +30,7 @@
     <changeSet id="009-receipt-staged-at" author="corebank">
         <sqlFile path="009-receipt-staged-at.sql" relativeToChangelogFile="true"/>
     </changeSet>
+    <changeSet id="010-transaction-effective-date" author="corebank">
+        <sqlFile path="010-transaction-effective-date.sql" relativeToChangelogFile="true" splitStatements="false"/>
+    </changeSet>
 </databaseChangeLog>

@@ -33,6 +33,9 @@ Existing installations using the old date-plus-one convention must follow the
 [clock migration procedure](camel/README.md#upgrade-from-the-date-plus-one-clock)
 before starting updated core or Camel applications.
 
+Existing transaction files/publishers also need the [effective-date upgrade](corebank/README.md#upgrading-transaction-effective-dates)
+when adopting migration 010.
+
 ### Build and run the core
 
 ```sh
@@ -133,6 +136,13 @@ updates balances, and writes `balance_20261017.dat`. No October 18 batch is crea
 Balances change when core successfully processes the batch, not when Kafka receives
 a record or when the clock event is merely published. New input can stage under
 October 19 while the October 17 batch processes.
+
+Transactions also carry an `effectiveDate`, separate from their batch date.
+For example, an October 18 transaction against an account opened October 18 is
+valid in the October 17 weekend batch. Eligibility compares effective date with
+account start date; balances still update only during batch processing.
+The generators use `--date` for account start dates and transaction effective dates.
+For Kafka generation, that flag does not change the active batch date.
 
 `camel_ingest.receipt.staged_at` records the database insertion time of the first
 successful receipt, separately from its `batch_date`. Replay preserves both.

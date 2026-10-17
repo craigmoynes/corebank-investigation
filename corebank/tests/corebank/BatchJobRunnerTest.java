@@ -33,7 +33,7 @@ class BatchJobRunnerTest {
     Path file(String type) { return config.inputDirectory().resolve(type+"_20261009.dat"); }
     void fixture(long account) throws Exception {
         Files.writeString(file("account"), String.format(java.util.Locale.ROOT,"%19d%s%10s%-8s\n", 2, day, "", "CHECKING"));
-        Files.writeString(file("transaction"), String.format(java.util.Locale.ROOT,"%19d%19d%-6s%20d\n", 10, account, "CR", 100));
+        Files.writeString(file("transaction"), String.format(java.util.Locale.ROOT,"%19d%19d%-6s%20d2026-10-09\n", 10, account, "CR", 100));
     }
     void run() throws Exception { new BatchJobRunner().run(config,day); }
     @Test void completesAndDuplicateDateIsNoOp() throws Exception {

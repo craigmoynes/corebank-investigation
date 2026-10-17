@@ -26,6 +26,7 @@
 //FILES db/changelog/007-camel.sql=../../postgres/changelog/007-camel.sql
 //FILES db/changelog/008-active-business-date.sql=../../postgres/changelog/008-active-business-date.sql
 //FILES db/changelog/009-receipt-staged-at.sql=../../postgres/changelog/009-receipt-staged-at.sql
+//FILES db/changelog/010-transaction-effective-date.sql=../../postgres/changelog/010-transaction-effective-date.sql
 
 import org.junit.platform.console.ConsoleLauncher;
 

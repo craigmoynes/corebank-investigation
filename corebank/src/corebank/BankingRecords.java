@@ -19,7 +19,7 @@ public final class BankingRecords {
     }
     public record Relationship(long accountId, long customerId, RelationshipType type) {
     }
-    public record Transaction(long transactionId, long accountId, TransactionType type, long amount) {
+    public record Transaction(long transactionId, long accountId, TransactionType type, long amount, LocalDate effectiveDate) {
     }
 
     public enum AccountType{

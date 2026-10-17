@@ -36,7 +36,7 @@ class BatchIngestorTest {
         Files.writeString(input.resolve("transaction_20261009.dat"), transaction(3, 12345));
     }
     private String transaction(long id, long amount) {
-        return String.format("%19d%19d%-6s%20d\n", id, 2, "CR", amount);
+        return String.format("%19d%19d%-6s%20d2026-10-09\n", id, 2, "CR", amount);
     }
     private long count(String table) throws Exception {
         try (var s = db.createStatement(); var r = s.executeQuery("SELECT count(*) FROM core_ingest." + table)) {
@@ -62,7 +62,7 @@ class BatchIngestorTest {
     @Test void rerunReplacesDateAndPreservesOtherDates() throws Exception {
         files(); ingestor.ingest(db, input, date);
         try (var s = db.createStatement()) {
-            s.executeUpdate("INSERT INTO core_ingest.transaction SELECT batch_date - 1, source_file, source_line, transaction_id, account_id, type, amount FROM core_ingest.transaction");
+            s.executeUpdate("INSERT INTO core_ingest.transaction SELECT batch_date - 1, source_file, source_line, transaction_id, account_id, type, amount, effective_date FROM core_ingest.transaction");
         }
         Files.writeString(input.resolve("transaction_20261009.dat"), transaction(4, 99));
         ingestor.ingest(db, input, date); ingestor.ingest(db, input, date);
