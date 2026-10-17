@@ -15,17 +15,21 @@ public final class BankingRoutes extends RouteBuilder {
     public BankingRoutes(Settings settings) { this.settings=settings; store=new Store(settings); files=new FilesBridge(store,settings); }
     @Override public void configure() {
         // Waiting for the initial date is expected. Other failures latch every route until restart.
-        onException(Store.AwaitingClock.class).maximumRedeliveries(0).handled(false);
-        onException(Exception.class).maximumRedeliveries(0).process(e -> {
+        onException(Store.AwaitingClock.class).maximumRedeliveries(0).logExhausted(false).handled(false);
+        onException(Exception.class).maximumRedeliveries(0).logExhausted(false).process(e -> {
             Throwable cause=e.getProperty(Exchange.EXCEPTION_CAUGHT,Throwable.class);
-            if (failure.compareAndSet(null,cause)) log.error("Camel banking routes blocked; correct the problem and restart",cause);
+            if (failure.compareAndSet(null,cause)) log.error("Camel banking routes blocked; correct the problem and restart route={} topic={} partition={} offset={}",
+                e.getFromRouteId(),e.getMessage().getHeader(KafkaConstants.TOPIC),
+                e.getMessage().getHeader(KafkaConstants.PARTITION),e.getMessage().getHeader(KafkaConstants.OFFSET),cause);
         }).handled(false);
         from(consumer(Topics.DATE)).routeId("batch-date").process(this::ingest);
         for (String kind : Topics.KINDS)
             from(consumer("input."+kind)).routeId("stage-"+kind).process(this::ingest);
         from("timer:closed-batches?period=1000&delay=1000").routeId("extract-closed-batches")
+            .filter(e -> failure.get() == null)
             .process(e -> { requireHealthy(); files.extractNextClosedBatchIfAvailable(); });
         from("timer:balance-files?period=1000&delay=1000").routeId("publish-balances")
+            .filter(e -> failure.get() == null)
             .process(e -> {
                 requireHealthy();
                 try (ProducerTemplate producer=e.getContext().createProducerTemplate()) {
@@ -45,10 +49,12 @@ public final class BankingRoutes extends RouteBuilder {
     private void ingest(Exchange e) throws Exception {
         requireHealthy();
         var m=e.getMessage();
-        store.accept(new Store.Source(m.getHeader(KafkaConstants.TOPIC,String.class),
+        var date=store.accept(new Store.Source(m.getHeader(KafkaConstants.TOPIC,String.class),
             m.getHeader(KafkaConstants.PARTITION,Integer.class),m.getHeader(KafkaConstants.OFFSET,Long.class),
             m.getHeader(KafkaConstants.KEY,String.class),m.getBody(String.class)));
         // Must remain on the Kafka consumer thread; never put an async EIP before this commit.
         m.getHeader(KafkaConstants.MANUAL_COMMIT,KafkaManualCommit.class).commit();
+        log.debug("Kafka offset acknowledged batchDate={} topic={} partition={} offset={}",date,
+            m.getHeader(KafkaConstants.TOPIC),m.getHeader(KafkaConstants.PARTITION),m.getHeader(KafkaConstants.OFFSET));
     }
 }

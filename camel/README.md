@@ -210,6 +210,37 @@ already-running exchanges remain committed. Retain receipts while offsets can be
 replayed. Database loss, topic recreation, and retention cleanup require coordinated
 operator recovery; they are not automated.
 
+## Logging
+
+Application logs use the `banking` category and default to INFO with the bundled
+SLF4J Simple backend. INFO records initial/advanced batch dates, closed batches,
+and extraction/publication start and completion. Completion includes counts and
+elapsed milliseconds and is logged only after the database receipt commits.
+Repeated dates, empty polls and already-published files do not generate INFO logs.
+
+Enable per-message DEBUG logs without enabling framework DEBUG logging:
+
+```sh
+jbang camel/src/CamelBanking.java --debug
+```
+
+The `--debug` flag sets `org.slf4j.simpleLogger.log.banking=debug` before logging
+initializes. It can also be combined with `--topics`; the JVM property remains
+available for manual configuration.
+
+DEBUG records staging, source-receipt duplicates, Kafka offset acknowledgement,
+and individual balance sends. Input logs identify topic/partition/offset and
+assigned batch date; balance logs identify file and one-based record number.
+Payloads and balances are not included in these application messages.
+Staging and offset acknowledgement are separate events. A balance send log means
+that send succeeded; only the file completion log confirms the publication receipt
+committed. Partial sends can therefore appear again during recovery.
+
+The first unexpected route failure logs ERROR with route/source context and the
+exception. Camel's redundant exhausted-exchange logging is disabled; blocked
+timers skip further work until restart. Kafka/framework diagnostics may still
+report failed deliveries. No WARN is emitted for normal idle polling or repeats.
+
 ## Upgrade from the date-plus-one clock
 
 Migration 008 changes `clock.control_date` to `clock.active_date` and adds one day

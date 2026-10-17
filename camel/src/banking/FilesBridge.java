@@ -9,6 +9,9 @@ import java.util.*;
 
 /** Database/file/broker boundaries are at-least-once, with explicit recovery receipts. */
 public final class FilesBridge {
+    private static final org.slf4j.Logger LOG=org.slf4j.LoggerFactory.getLogger(FilesBridge.class);
+    private record Extraction(LocalDate date, Map<String,Long> counts, boolean recovered) {}
+    private record Publication(LocalDate date, int records) {}
     @FunctionalInterface public interface Publish { void send(String key,String json) throws Exception; }
     private final Store store;
     private final Settings settings;
@@ -19,13 +22,16 @@ public final class FilesBridge {
      * @throws Exception if extraction fails; failures are not treated as absence of work
      */
     public boolean extractNextClosedBatchIfAvailable() throws Exception {
-        return store.inTransaction(db -> {
+        long started=System.nanoTime();
+        Extraction result=store.inTransaction(db -> {
             Store.lock(db,1);
             LocalDate date;
             try (var s=db.createStatement(); var r=s.executeQuery("SELECT batch_date FROM camel_ingest.batch WHERE closed AND NOT extracted ORDER BY batch_date LIMIT 1 FOR UPDATE")) {
-                if (!r.next()) return false;
+                if (!r.next()) return null;
                 date=r.getObject(1,LocalDate.class);
             }
+            LOG.info("Batch extraction started batchDate={}",date);
+            Map<String,Long> counts=new LinkedHashMap<>();
             Files.createDirectories(settings.input());
             String stamp=date.format(DateTimeFormatter.BASIC_ISO_DATE);
             // Never recreate a consumed trigger after a crash between publication and DB commit.
@@ -38,7 +44,9 @@ public final class FilesBridge {
                     try (var writer=Files.newBufferedWriter(temp,StandardCharsets.UTF_8);
                          var s=db.prepareStatement("SELECT fixed_line FROM camel_ingest.record WHERE batch_date=? AND kind=? ORDER BY business_key")) {
                         s.setObject(1,date); s.setString(2,kind); s.setFetchSize(500);
-                        try (var r=s.executeQuery()) { while(r.next()) { writer.write(r.getString(1)); writer.write('\n'); } }
+                        long count=0;
+                        try (var r=s.executeQuery()) { while(r.next()) { writer.write(r.getString(1)); writer.write('\n'); count++; } }
+                        counts.put(kind,count);
                     }
                     Path target=settings.input().resolve(kind+"_"+stamp+".dat");
                     if (consumed && !Files.exists(target)) throw new IllegalStateException("Consumed batch is missing input "+target);
@@ -51,8 +59,12 @@ public final class FilesBridge {
                 finally { Files.deleteIfExists(temp); }
             }
             Store.execute(db,"UPDATE camel_ingest.batch SET extracted=TRUE WHERE batch_date=?",date);
-            return true;
+            return new Extraction(date,counts,consumed);
         });
+        if (result == null) return false;
+        LOG.info("Batch extraction completed batchDate={} counts={} consumedTrigger={} elapsedMs={}",
+            result.date(),result.counts(),result.recovered(),(System.nanoTime()-started)/1_000_000);
+        return true;
     }
     private static void publish(Path temporary,Path target) throws Exception {
         if (Files.exists(target,LinkOption.NOFOLLOW_LINKS)) {
@@ -73,7 +85,8 @@ public final class FilesBridge {
         }
     }
     private boolean publishBalanceFileIfUnpublished(Path path,Publish sender) throws Exception {
-        return store.inTransaction(db -> {
+        long started=System.nanoTime();
+        Publication result=store.inTransaction(db -> {
             Store.lock(db,2);
             if (!Files.isRegularFile(path,LinkOption.NOFOLLOW_LINKS)) throw new IllegalArgumentException("Not a regular balance file: "+path);
             String filename=path.getFileName().toString();
@@ -85,10 +98,11 @@ public final class FilesBridge {
                 try (var r=s.executeQuery()) {
                     if (r.next()) {
                         if (!hash.equals(r.getString(1))) throw new IllegalArgumentException("Published balance file changed: "+filename);
-                        return false;
+                        return null;
                     }
                 }
             }
+            LOG.info("Balance publication started batchDate={} file={}",date,filename);
             var messages=new ArrayList<String>();
             var keys=new ArrayList<String>();
             long previous=0;
@@ -102,11 +116,18 @@ public final class FilesBridge {
                     messages.add(json); keys.add(date+":"+account);
                 }
             }
-            for (int i=0;i<messages.size();i++) sender.send(keys.get(i),messages.get(i));
+            for (int i=0;i<messages.size();i++) {
+                sender.send(keys.get(i),messages.get(i));
+                LOG.debug("Balance message published batchDate={} file={} record={} topic={}",date,filename,i+1,Topics.BALANCE);
+            }
             try (var s=db.prepareStatement("INSERT INTO camel_ingest.publication(filename,sha256) VALUES (?,?)")) {
                 s.setString(1,filename); s.setString(2,hash); s.executeUpdate();
             }
-            return true;
+            return new Publication(date,messages.size());
         });
+        if (result == null) return false;
+        LOG.info("Balance publication completed batchDate={} file={} records={} elapsedMs={}",
+            result.date(),path.getFileName(),result.records(),(System.nanoTime()-started)/1_000_000);
+        return true;
     }
 }

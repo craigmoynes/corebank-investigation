@@ -42,13 +42,22 @@ public class CamelBanking {
     }
 
     public static void main(String[] args) throws Exception {
+        boolean debug = false;
+        boolean provisionTopics = false;
+        for (String arg : args) {
+            switch (arg) {
+                case "--debug" -> debug = true;
+                case "--topics" -> provisionTopics = true;
+                default -> throw new IllegalArgumentException("Usage: CamelBanking.java [--debug] [--topics]");
+            }
+        }
+        // SLF4J Simple reads configuration on first use; configure before startup.
+        if (debug) System.setProperty("org.slf4j.simpleLogger.log.banking", "debug");
         Settings settings = Settings.fromEnvironment();
-        if (args.length == 1 && args[0].equals("--topics")) {
+        if (provisionTopics) {
             Topics.provision(settings.brokers());
             return;
         }
-        if (args.length != 0)
-            throw new IllegalArgumentException("Usage: CamelBanking.java [--topics]");
         Topics.verify(settings.brokers());
         migrate(settings);
         // One route application per database, irrespective of the chosen Kafka group.
