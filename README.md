@@ -69,7 +69,10 @@ jbang camel/src/CamelBanking.java --topics
 jbang camel/src/CamelBanking.java
 ```
 
-For a fresh Camel clock, generate ten records of each type for October 17:
+For a fresh Camel clock, generate input for October 17. `--all` defaults to
+**10 customers, 10 accounts, 10 relationships, and 10 transactions** (40 records
+total, plus the batch-date control event). Override individual counts with options
+such as `--transactions=100`:
 
 ```sh
 jbang camel/src/KafkaGenerator.java --date=2026-10-17 --all --batch-date=2026-10-16
