@@ -175,3 +175,69 @@ documented in the repository README.
 
 References: [Camel Kafka manual commits](https://camel.apache.org/components/4.18.x/kafka-component.html),
 [Redpanda local development](https://docs.redpanda.com/streaming/current/get-started/quick-start/).
+
+## Generate Kafka input
+
+The transport-neutral `corebank.generator.Generate` prepares a read-only database
+snapshot and streams typed field values to a single-use sink. `FileGenerator`
+writes the existing fixed-width format; `banking.KafkaGenerator` serializes those
+same fields as JSON with exact 64-bit numbers and the topic keys above. Reference
+pools and used IDs still occupy memory; message payloads are not accumulated.
+
+From `implementation/`, with migrated database credentials exported and topics
+provisioned as above:
+
+```sh
+# Publish only the clock event; no business date or database connection needed.
+jbang camel/src/KafkaGenerator.java --batch-date=2026-10-16
+
+# Opens business date October 17, then publishes ten records of each type.
+jbang camel/src/KafkaGenerator.java --date=2026-10-17 --all --batch-date=2026-10-16
+
+# No clock event; use the date already active in Camel.
+jbang camel/src/KafkaGenerator.java --date=2026-10-17 --transactions=1000
+
+# Bare type flags mean ten, explicit counts override --all.
+jbang camel/src/KafkaGenerator.java --date=2026-10-17 --customers=100 --accounts --seed=123 --max-pending=500
+```
+
+`--date` controls generated account dates and eligibility and is required only
+when selecting data record types. `--batch-date` alone publishes the literal
+`system.batch-date` value without starting Spring or connecting to the database.
+With data selected, it must equal `--date` minus one day.
+It is acknowledged before record generation/publication begins. Acknowledgement
+is not confirmation that Camel processed the clock: ordering across topic
+consumers remains unchanged. Without this option no control event is sent.
+A standalone control uses the supplied date as-is; Camel opens the following
+business day. If `--date` is also supplied without data types, it is unused.
+Control dates must allow a following business day in the supported years 0001–9999.
+
+`--brokers` overrides `CAMEL_BROKERS` (default `localhost:19092`). Repeat
+`--topic customer=custom.customer` or `--topic batch-date=custom.clock` to override
+topics; configure matching consumers separately. The producer uses partition zero,
+`acks=all`, idempotence, and at most `--max-pending` outstanding record futures
+(default 1000). It checks every future before reporting success. Failures exit
+nonzero; already accepted records cannot be rolled back, and reruns can duplicate
+records. Database settings, `--db-url`, `--db-user`, resources and seed conventions
+match the file generator. It never runs migrations or writes database rows.
+
+Tests without a broker:
+
+```sh
+jbang camel/tests/KafkaGeneratorTests.java
+jbang camel/tests/KafkaGeneratorCliTests.java
+```
+
+These exercise delayed/failed control acknowledgement, final data acknowledgement,
+bounded sends, data failure propagation, keys, exact long JSON and topic overrides.
+The core generator integration suite also checks all four JSON types against the
+file output through Camel's strict decoder.
+
+To include the real-broker delivery test, set `CAMEL_TEST_BROKERS` to a disposable
+broker. The test creates and removes a uniquely named topic, verifies one control
+plus 25 data messages, and uses one partition for both to inspect publication order
+without implying any ordering guarantee across the production topics:
+
+```sh
+CAMEL_TEST_BROKERS=localhost:39092 jbang camel/tests/KafkaGeneratorTests.java
+```

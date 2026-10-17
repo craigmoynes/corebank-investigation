@@ -1,5 +1,7 @@
 ///usr/bin/env jbang "$0" "$@" ; exit $?
 //JAVA 21
+//DEPS com.fasterxml.jackson.core:jackson-databind:2.18.3
+//SOURCES ../../camel/src/banking/Records.java
 //SOURCES ../src/corebank/BatchLocks.java
 //DEPS org.springframework.boot:spring-boot-dependencies:3.4.4@pom
 //DEPS org.springframework.boot:spring-boot-starter
@@ -11,7 +13,7 @@
 //SOURCES ../src/corebank/BankingRecords.java ../src/corebank/ingest/BatchIngestor.java
 //SOURCES ../src/corebank/readers/*.java
 //SOURCES corebank/GeneratorTest.java
-//SOURCES ../src/corebank/generator/BatchGenerator.java
+//SOURCES ../src/corebank/generator/BatchGenerator.java ../src/corebank/generator/Generate.java ../src/corebank/generator/GeneratedRecord.java ../src/corebank/generator/FileGenerator.java
 //FILES generator/firstnames.txt=../src/resources/firstnames.txt
 //FILES generator/lastnames.txt=../src/resources/lastnames.txt
 //FILES generator/streets.txt=../src/resources/streets.txt

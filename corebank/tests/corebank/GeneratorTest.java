@@ -143,6 +143,24 @@ class GeneratorTest {
     }
 
     @Test
+    void sharedRecordsMatchFilesAndCamelJsonForEveryType() throws Exception {
+        var request=new Request(date,20,20,20,20,42);
+        generator.generate(db,directory,request);
+        var source=new corebank.generator.Generate().prepare(db,
+            new corebank.generator.Generate.Request(date,20,20,20,20,42));
+        var lines=new java.util.LinkedHashMap<String,java.util.List<String>>();
+        source.writeTo(record -> {
+            var decoded=banking.Records.decode(record.kind(),banking.Records.JSON.writeValueAsString(record.fields()));
+            assertEquals(record.key(),decoded.key());
+            assertEquals(record.line(),decoded.line());
+            lines.computeIfAbsent(record.kind(),k -> new java.util.ArrayList<>()).add(record.line());
+        });
+        for(var entry:lines.entrySet()) assertEquals(Files.readAllLines(file(entry.getKey())),entry.getValue());
+        assertEquals(4,lines.size());
+        assertThrows(IllegalStateException.class,() -> source.writeTo(record -> {}));
+    }
+
+    @Test
     void validatesCountsDatesAndUnicodeWidths() {
         assertThrows(IllegalArgumentException.class, () -> new Request(date, -1, 0, 0, 0, 1));
         assertThrows(IllegalArgumentException.class, () -> new Request(LocalDate.of(10000, 1, 1), 0, 0, 0, 0, 1));

@@ -467,3 +467,21 @@ names allow 15, leaving space for the generated house number in the 20-position
 address field. Invalid or empty lists fail generation with a clear error; values
 are never truncated. JBang bundles these files as classpath resources for both
 the generator and its test launcher. Changes to the lists can change seeded output.
+
+### Shared file and Kafka generation
+
+`corebank.generator.Generate` now owns transport-independent record generation.
+`corebank.generator.FileGenerator` handles file publication; the existing
+`BatchGenerator` API and `corebank/src/Generate.java` command remain compatible.
+The explicit file entry point has identical arguments:
+
+```sh
+jbang corebank/src/FileGenerator.java --date=2026-10-17 --all
+```
+
+For JSON publication to the existing Camel topics, use
+`camel/src/KafkaGenerator.java`. It supports the same date, seed and per-type
+counts, optional acknowledged batch-date publication, and bounded asynchronous
+sends. See [Kafka generator usage and ordering](camel/README.md#generate-kafka-input).
+The generator database suite includes a seventh test comparing every generated
+record type across file and JSON serialization.

@@ -1,5 +1,6 @@
 ///usr/bin/env jbang "$0" "$@" ; exit $?
 //JAVA 21
+//SOURCES ../../corebank/src/corebank/generator/Generate.java ../../corebank/src/corebank/generator/GeneratedRecord.java
 //DEPS org.apache.camel:camel-bom:4.18.0@pom
 //DEPS org.apache.camel:camel-main
 //DEPS org.apache.camel:camel-kafka
