@@ -25,7 +25,129 @@ Directories are configured in `corebank/application.yaml`; override them with
 `COREBANK_INPUT_DIRECTORY`, `COREBANK_OUTPUT_DIRECTORY`, and
 `COREBANK_ERROR_DIRECTORY`, or the corresponding `--corebank.*-directory` options.
 The watcher uses the error directory for failure markers and archived diagnostics.
-See the [design and file contracts](../docs/banking-core-design.md) for field specifications.
+The [file format reference](#file-format-reference) below defines every input and
+output layout; the [design document](../docs/banking-core-design.md) provides broader context.
+
+## File format reference
+
+All `.dat` files contain fixed-width records with no headers, trailers, comments,
+or field delimiters. Positions below are **one-based and inclusive**, measured in
+Unicode code points after NFC normalization, not UTF-8 bytes. Record widths exclude
+the line ending. Use UTF-8 without a BOM, LF (`\n`) line endings, and ordinary
+spaces for padding. Embedded tabs, control characters, CRLF, blank records, and
+short or long records are rejected. A zero-byte input file is valid; all four input
+files must still exist. Readers accept a final record without LF; generators and
+the balance exporter write LF after every record.
+
+Generators write numbers right-aligned and text/type fields left-aligned, padded
+with spaces. Input readers trim field padding and do not otherwise enforce
+alignment; dates must occupy exactly ten positions. Overlength values must not be
+truncated. For example, `José` occupies four code points but five UTF-8 bytes.
+
+Every ID is unsigned decimal digits representing **1–9223372036854775807**.
+Money is integer cents, with no decimal point, thousands separator, or currency
+symbol: `12345` means 123.45 currency units. There is no currency field in these
+formats. Enum values are case-sensitive.
+
+`YYYYMMDD` in each filename is the batch's business date, not the time the file was
+written. The date is not repeated as a batch-date field inside records. Account
+start/end dates describe the account itself. All files in a batch use the same
+filename date.
+
+### Customer input: `customer_YYYYMMDD.dat`
+
+Each record is **88 positions**. Business key: `customerId`.
+
+| Field | Positions | Width | Format |
+| --- | --- | --- | --- |
+| `customerId` | 1–19 | 19 | Positive decimal ID |
+| `firstName` | 20–29 | 10 | Space-padded text |
+| `lastName` | 30–39 | 10 | Space-padded text |
+| `addressLine1` | 40–59 | 20 | Space-padded text |
+| `city` | 60–69 | 10 | Space-padded text |
+| `province` | 70–71 | 2 | Space-padded text |
+| `postalCode` | 72–78 | 7 | Space-padded text, e.g. `A1B 2C3` |
+| `country` | 79–88 | 10 | Space-padded text |
+
+All positions must be present. The current reader maps all-space text fields to
+empty strings; it does not impose nonblank name/address or postal-code-pattern
+validation. Records supply full customer values, not partial updates.
+
+### Account input: `account_YYYYMMDD.dat`
+
+Each record is **47 positions**. Business key: `accountId`.
+
+| Field | Positions | Width | Format |
+| --- | --- | --- | --- |
+| `accountId` | 1–19 | 19 | Positive decimal ID |
+| `startDate` | 20–29 | 10 | Required valid calendar date, `YYYY-MM-DD` |
+| `endDate` | 30–39 | 10 | Valid `YYYY-MM-DD`, or exactly ten spaces for no end date |
+| `accountType` | 40–47 | 8 | `SAVINGS` or `CHECKING`, space-padded |
+
+Processing checks that an end date does not precede the start date. New
+transactions require an account with no end date and a start date on or before
+the batch date. Account records supply full values, not partial updates.
+
+### Relationship input: `relationship_YYYYMMDD.dat`
+
+Each record is **47 positions**. Business key: (`accountId`, `customerId`).
+
+| Field | Positions | Width | Format |
+| --- | --- | --- | --- |
+| `accountId` | 1–19 | 19 | Positive decimal account ID |
+| `customerId` | 20–38 | 19 | Positive decimal customer ID |
+| `type` | 39–47 | 9 | `PRIMARY` or `SECONDARY`, space-padded |
+
+The account and customer must resolve during processing, including entities
+provided in the same batch. Each pair has one relationship type.
+
+### Transaction input: `transaction_YYYYMMDD.dat`
+
+Each record is **64 positions**. Business key: `transactionId`.
+
+| Field | Positions | Width | Format |
+| --- | --- | --- | --- |
+| `transactionId` | 1–19 | 19 | Positive decimal transaction ID |
+| `accountId` | 20–38 | 19 | Positive decimal account ID |
+| `type` | 39–44 | 6 | `CR` or `DR`, space-padded |
+| `amount` | 45–64 | 20 | Unsigned integer cents, 0–9223372036854775807 |
+
+`CR` adds the amount to the account balance; `DR` subtracts it. The amount itself
+has no sign. Transaction IDs are globally immutable: an identical replay on a
+later batch date does not post again; changed contents for an existing ID fail.
+Duplicate business keys within any one input file fail processing, even if their
+contents match. Cross-record references and business rules are checked during
+processing, after individual records have been parsed and staged.
+
+### Balance output: `balance_YYYYMMDD.dat`
+
+Each record is **39 positions**, followed by LF. Records are sorted by account ID.
+
+| Field | Positions | Width | Format |
+| --- | --- | --- | --- |
+| `accountId` | 1–19 | 19 | Positive decimal ID, right-aligned and space-padded |
+| `balance` | 20–39 | 20 | Signed integer cents, right-aligned and space-padded |
+
+Balance range: **-9223372036854775808–9223372036854775807**. Negative values use a
+minus immediately before the digits; zero and positive values have no sign.
+This is the final balance in the batch's saved snapshot, not the batch's net change.
+The output includes new accounts (even with zero balance) and existing accounts
+with newly posted transactions. An empty snapshot produces a zero-byte file.
+See [Export balance output](#export-balance-output) for inclusion and retry rules.
+
+### Batch trigger and lifecycle files
+
+`batch_YYYYMMDD.trg` is a readiness marker, not a fixed-width data file. An empty
+file is sufficient; the filename supplies the business date. Publish it in the
+input directory only after all four `.dat` files are complete. Manual stage and
+batch commands do not require it.
+
+The watcher renames it to `batch_YYYYMMDD.INPROGRESS.trg` while running. On success,
+`batch_YYYYMMDD.COMPLETE.trg` in the output directory preserves the trigger contents.
+On handled failure, `batch_YYYYMMDD.ERROR.trg` in the error directory contains text
+diagnostics (timestamp, phase, and exception details), not a fixed-width record
+layout. These lifecycle markers are not banking input records. See
+[Monitor trigger files](#monitor-trigger-files) for recovery behavior.
 
 ## Run the core and reader tests
 
