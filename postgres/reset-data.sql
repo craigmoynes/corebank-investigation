@@ -1,6 +1,7 @@
 -- Development reset: deletes all application data and Spring Batch job history.
--- Stop core commands and other database writers before running this script.
--- Requires migrations through 006. Liquibase history and schema definitions remain.
+-- Stop core and Camel commands and other database writers before running this script.
+-- Camel broker/group offsets must be reset consistently before replay; this SQL does not reset Kafka.
+-- Requires migrations through 007. Liquibase history and schema definitions remain.
 -- Input/output/error files on disk are not removed: move old output files aside
 -- before reusing batch dates, or the exporter may reject conflicting contents.
 -- CASCADE also truncates any additional tables referencing the listed tables.
@@ -11,6 +12,10 @@ BEGIN;
 -- related set in one statement; separate child-first statements are insufficient
 -- to satisfy TRUNCATE's foreign-key requirements without CASCADE.
 TRUNCATE TABLE
+    camel_ingest.record,
+    camel_ingest.receipt,
+    camel_ingest.batch,
+    camel_ingest.publication,
     -- Spring Batch execution history.
     core_batch.batch_step_execution_context,
     core_batch.batch_job_execution_context,
@@ -41,5 +46,7 @@ RESTART IDENTITY CASCADE;
 ALTER SEQUENCE core_batch.batch_step_execution_seq RESTART WITH 1;
 ALTER SEQUENCE core_batch.batch_job_execution_seq RESTART WITH 1;
 ALTER SEQUENCE core_batch.batch_job_seq RESTART WITH 1;
+
+UPDATE camel_ingest.clock SET control_date=NULL, updated_at=now();
 
 COMMIT;

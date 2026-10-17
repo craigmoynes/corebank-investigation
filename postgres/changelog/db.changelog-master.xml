@@ -21,4 +21,7 @@
     <changeSet id="006-batch-jobs" author="corebank">
         <sqlFile path="006-batch-jobs.sql" relativeToChangelogFile="true"/>
     </changeSet>
+    <changeSet id="007-camel" author="corebank">
+        <sqlFile path="007-camel.sql" relativeToChangelogFile="true"/>
+    </changeSet>
 </databaseChangeLog>

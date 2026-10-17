@@ -23,6 +23,7 @@
 //FILES db/changelog/004-ingestion-receipt.sql=../../postgres/changelog/004-ingestion-receipt.sql
 //FILES db/changelog/005-balance-output.sql=../../postgres/changelog/005-balance-output.sql
 //FILES db/changelog/006-batch-jobs.sql=../../postgres/changelog/006-batch-jobs.sql
+//FILES db/changelog/007-camel.sql=../../postgres/changelog/007-camel.sql
 
 import corebank.CoreApplication;
 

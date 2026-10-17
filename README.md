@@ -4,14 +4,33 @@ A Java banking batch and Apache Camel integration learning project.
 
 ## Status
 
-Java 21 / Spring Boot core launched with JBang, YAML configuration, banking records, and tested Spring Batch readers for all four input files. PostgreSQL staging ingestion is implemented for all four files. Operational tables, audit timestamps, account balance initialization, and batch-attempt tracking are defined through Liquibase. Business validation, reference-data upserts, immutable transaction posting, atomic balance updates, dated balance snapshots, and balance-file generation are implemented. Spring Batch orchestrates all three stages through `--batch`. Trigger monitoring is available through `--watch`; Camel publication remains future work.
+Java 21 / Spring Boot core launched with JBang, YAML configuration, banking records, and tested Spring Batch readers for all four input files. PostgreSQL staging ingestion is implemented for all four files. Operational tables, audit timestamps, account balance initialization, and batch-attempt tracking are defined through Liquibase. Business validation, reference-data upserts, immutable transaction posting, atomic balance updates, dated balance snapshots, and balance-file generation are implemented. Spring Batch orchestrates all three stages through `--batch`. Trigger monitoring is available through `--watch`; Camel Kafka ingestion, closed-date extraction, and balance publication are implemented; see [Camel setup](camel/README.md).
 
 See [the design document](docs/banking-core-design.md) for agreed requirements and open decisions.
+
+## Kafka topics and Camel routes
+
+See [the Camel runbook](camel/README.md) for setup, schemas, date policy, recovery,
+and integration tests. The source topics are `system.batch-date`, `input.customer`,
+`input.account`, `input.relationship`, and `input.transaction`; balances are published
+to `output.balance`. The source date plus one day supplies the assigned batch date.
+
+```sh
+jbang camel/src/CamelBanking.java --topics
+# With COREBANK_DB_PASSWORD set (same database and directories as the core):
+jbang camel/src/CamelBanking.java
+```
+
+The existing local broker defaults to `localhost:19092`. Provisioning creates and
+verifies one-partition, one-replica development topics with unbounded retention.
+Routes stage records durably, extract only closed dates, and publish per-account
+balance JSON with stable keys and at-least-once delivery. Configuration details and
+working assumptions are explicit in the runbook.
 
 ## Layout
 
 - `corebank/`: Java banking core.
-- `camel/`: future Camel routes developed with JBang and Camel MCP.
+- `camel/`: JBang Camel routes, topic provisioning, and integration tests.
 - `postgres/`: database schemas and migrations.
 - `docker/`: Docker Compose and container configuration.
 - `data/input/`: fixed-width batch inputs and triggers.
@@ -115,7 +134,7 @@ JDBC inserts execute in groups of 500 within one transaction.
 Duplicate business keys are retained for processing validation, not silently overwritten.
 This command only stages data. The separate --process command validates cross-record
 references, updates core tables, posts balances, and saves output snapshots. The --output
-command writes balance files. Use `--watch` for trigger monitoring. Camel publication remains future work.
+command writes balance files. Use `--watch` for trigger monitoring. Camel Kafka ingestion, closed-date extraction, and balance publication are implemented; see [Camel setup](camel/README.md).
 
 ### Monitor trigger files
 
@@ -272,7 +291,7 @@ pending operator investigation; automatic crash recovery is not implemented. Ver
 the original process/connection has ended and inspect the attempt before marking
 an abandoned RUNNING row FAILED with completed_at and an explanatory error_message.
 A COMPLETED attempt must never be changed to FAILED. Retry after recovery.
-Trigger monitoring is available through `--watch`; Camel publication remains future work.
+Trigger monitoring is available through `--watch`; Camel Kafka ingestion, closed-date extraction, and balance publication are implemented; see [Camel setup](camel/README.md).
 
 ### Export balance output
 

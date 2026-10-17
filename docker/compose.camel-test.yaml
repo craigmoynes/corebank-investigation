@@ -1,0 +1,32 @@
+name: corebank-camel-tests
+services:
+  postgres:
+    image: postgres:18-bookworm
+    environment:
+      POSTGRES_DB: corebank_test
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: test_only
+    ports: ["127.0.0.1:55432:5432"]
+    tmpfs: [/var/lib/postgresql]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d corebank_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v25.3.1
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=512M
+      - --reserve-memory=0M
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:39092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:39092
+    ports: ["127.0.0.1:39092:39092"]
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health", "--exit-when-healthy", "-X", "brokers=localhost:9092"]
+      interval: 2s
+      timeout: 5s
+      retries: 30

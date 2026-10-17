@@ -1,6 +1,6 @@
 # Corebank Investigation — Design
 
-Status: PostgreSQL Compose configuration, a Java 21 / Spring Boot 3.4.4 application launched with JBang, YAML configuration, and initial banking records are implemented. Spring Batch readers for all four input record types and a Unicode-aware tokenizer are implemented and tested. PostgreSQL staging tables and explicit command-line ingestion are implemented. Operational tables are implemented through Liquibase. Batch business validation, posting, output snapshots, and balance-file generation are implemented; trigger monitoring is implemented; Camel publication remains future work. Updated 2026-10-09.
+Status: PostgreSQL Compose configuration, a Java 21 / Spring Boot 3.4.4 application launched with JBang, YAML configuration, and initial banking records are implemented. Spring Batch readers for all four input record types and a Unicode-aware tokenizer are implemented and tested. PostgreSQL staging tables and explicit command-line ingestion are implemented. Operational tables are implemented through Liquibase. Batch business validation, posting, output snapshots, and balance-file generation are implemented; trigger monitoring is implemented; Camel topic provisioning, ingestion, closed-date extraction, and balance publication are implemented. Updated 2026-10-16.
 
 ## Purpose and scope
 
@@ -204,7 +204,7 @@ The host directories live under the repository’s `data/` directory. Containeri
 
 ## Camel ingestion and business-date clock
 
-Source topics contain real-time records. A separate control topic carries dates. The conversation called this both the “batch” topic and the “date” topic; its final name is undecided.
+Source topics contain real-time records. A separate control topic carries dates. The final topic name is `system.batch-date` (confirmed 2026-10-16).
 
 Confirmed assignment rule:
 
@@ -231,7 +231,7 @@ Recommended recovery behaviour:
 - Preserve each record's original batch assignment when retrying.
 - Retain source topic, partition, and offset as ingestion identity and traceability metadata.
 
-Backward dates, skipped dates, control-message replay, startup ordering, and concurrent consumers still need explicit policies.
+Implemented policies and the serialization boundary are described in the 2026-10-16 section below.
 
 ## Daily extraction and return flow
 
@@ -263,7 +263,7 @@ Real-time data topics + date control topic
               Balance output topic
 ```
 
-The precise extraction trigger is unresolved: it may run immediately after a date transition or at a daily scheduled time after closure. It must not extract the currently open batch date.
+Implementation assumption: a one-second timer extracts the oldest closed, unextracted date after a transition. It never extracts the currently open date.
 
 Suggested file publication protocol:
 
@@ -272,7 +272,7 @@ Suggested file publication protocol:
 3. Create the batch trigger last.
 4. Generate the balance output under a temporary name and publish its final name only when complete.
 
-Camel's output route then reads the completed balance file and publishes to a topic. Message schema, topic name, and whether publication is per account or per file remain undecided.
+Camel reads the completed balance file and publishes per-account JSON to `output.balance`, keyed by `batchDate:accountId`. See the implementation assumptions below.
 
 ## Proposed reliability defaults — not all confirmed
 
@@ -309,7 +309,7 @@ For kind, shared file access and persistent database/broker storage need explici
 - Error-directory contents and error artifact publication; missing files, invalid records, and duplicate-key rejection are already handled by ingestion/processing.
 - Recovery of abandoned RUNNING attempts, corrections to completed dates, retention, and file archival. Failed dates can already be re-ingested/retried; completed-date processing retries are no-ops.
 
-Deferred Camel decisions: topic names and message formats, upsert ordering, date-transition coordination, daily extraction scheduling, and output publication/recovery. These do not need to be resolved for the initial core design.
+The initial Camel decisions are recorded below and in `camel/README.md`; production retention/replication, dead-letter handling, and automated disaster recovery remain deferred.
 
 ## Reference documentation
 
@@ -523,3 +523,41 @@ Corrected dates are retried by publishing a new ready trigger. Previous error
 reports are archived on replacement or successful retry. A forced crash or file
 finalization failure can leave INPROGRESS; encountering one stops monitoring for
 operator review. No automatic business/metadata crash-state recovery is attempted.
+
+
+## Camel flows — implemented 2026-10-16
+
+This section supersedes earlier statements that Camel is future work. Topic naming
+was confirmed during implementation: `system.batch-date`, `input.customer`,
+`input.account`, `input.relationship`, `input.transaction`, and `output.balance`.
+The existing confirmed date rule remains control date + one calendar day.
+
+Working implementation assumptions for previously open decisions:
+
+- One partition and one replica per topic for the existing local Redpanda broker.
+  Delete policy with unbounded time/size retention preserves controls and replays.
+  Provisioning verifies existing settings without silently reconfiguring topics.
+- Plain ISO date values keyed `clock`; full-record JSON inputs keyed by business ID
+  (account/customer pair for relationships); per-account balance JSON keyed by date
+  and account. IDs and cents remain 64-bit integers.
+- Migration 007 adds a durable clock, batches, source receipts, staged records, and
+  output publication hashes. Four named views expose the staged record types over
+  shared storage. Validation produces the existing fixed-width Unicode contract.
+- Clock-row locking serializes date changes with record assignment. Dates repeat or
+  advance one day; new backward/skipped controls fail. An original source replay is
+  recognized before date validation and keeps its original assignment. New records
+  wait for initialization. Reference upserts use the latest source offset, while
+  conflicting transaction IDs within a date fail.
+- The oldest closed date is extracted on a timer. All four files are atomically
+  published individually before the ready trigger; matching files and retained
+  lifecycle markers support recovery across DB/filesystem commit gaps.
+- Balance files are validated in full, published with synchronous broker acks, then
+  receipted by filename/hash. A crash can redeliver stable keys. Consumers deduplicate;
+  no end-to-end exactly-once guarantee is made. Empty output produces no messages.
+- Unexpected failures block this route application until operator correction and
+  restart. Automatic poison-message skipping and abandoned-state recovery remain
+  deferred. One launcher per database is enforced by a session advisory lock.
+
+Full contracts, configuration, limitations, and tests are in
+[the Camel runbook](../camel/README.md). The tests use a disposable PostgreSQL DB and
+Redpanda broker, including the existing core's reader/posting/export implementations.
