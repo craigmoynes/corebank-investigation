@@ -213,10 +213,19 @@ operator recovery; they are not automated.
 ## Logging
 
 Application logs use the `banking` category and default to INFO with the bundled
-SLF4J Simple backend. INFO records initial/advanced batch dates, closed batches,
+Logback backend. INFO records initial/advanced batch dates, closed batches,
 and extraction/publication start and completion. Completion includes counts and
 elapsed milliseconds and is logged only after the database receipt commits.
 Repeated dates, empty polls and already-published files do not generate INFO logs.
+
+Each input type also uses Camel's built-in throughput logger under
+`banking.ingest.<kind>`. Every 60 seconds it reports the interval message count,
+running total and processing rate at INFO, including zero-count idle intervals.
+This is a logging heartbeat, not a Kafka health check. A message
+is counted only after database staging and Kafka manual acknowledgement succeed.
+These are processed-message counts, including successful duplicate replays and
+reference updates, not counts of unique staged rows. Counters reset on restart,
+may span business dates, and are not durable audit totals. Payloads are not logged.
 
 Enable per-message DEBUG logs without enabling framework DEBUG logging:
 
@@ -224,9 +233,16 @@ Enable per-message DEBUG logs without enabling framework DEBUG logging:
 jbang camel/src/CamelBanking.java --debug
 ```
 
-The `--debug` flag sets `org.slf4j.simpleLogger.log.banking=debug` before logging
-initializes. It can also be combined with `--topics`; the JVM property remains
-available for manual configuration.
+The `--debug` flag sets `banking.log.level=DEBUG` before logging initializes.
+It can also be combined with `--topics`. For manual configuration, use
+`jbang -Dbanking.log.level=DEBUG camel/src/CamelBanking.java`.
+
+JBang bundles `camel/logback.xml` automatically; launch commands are unchanged.
+The configuration reuses Spring Boot 3.4.4 console defaults, matching the core
+and generators: timestamp with timezone, level, PID, application name (`camel`),
+thread, logger and exception formatting. Spring Boot supplies logging resources
+only; Camel does not start a Spring application context. Console colours follow
+Boot’s terminal detection. Framework logging remains at INFO with `--debug`.
 
 DEBUG records staging, source-receipt duplicates, Kafka offset acknowledgement,
 and individual balance sends. Input logs identify topic/partition/offset and

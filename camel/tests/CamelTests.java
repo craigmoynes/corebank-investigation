@@ -6,10 +6,13 @@
 //DEPS org.apache.camel:camel-kafka
 //DEPS org.apache.camel:camel-timer
 //DEPS org.apache.camel:camel-direct
+//DEPS org.apache.camel:camel-log
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.18.3
 //DEPS org.postgresql:postgresql:42.7.5
 //DEPS org.liquibase:liquibase-core:4.29.2
-//DEPS org.slf4j:slf4j-simple:2.0.17
+//DEPS org.springframework.boot:spring-boot:3.4.4
+//DEPS ch.qos.logback:logback-classic:1.5.18
+//FILES logback.xml=../logback.xml
 //FILES db/changelog/001-schemas.sql=../../postgres/changelog/001-schemas.sql
 //FILES db/changelog/002-core-ingest.sql=../../postgres/changelog/002-core-ingest.sql
 //FILES db/changelog/003-core-operational.sql=../../postgres/changelog/003-core-operational.sql

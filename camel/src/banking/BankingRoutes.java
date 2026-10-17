@@ -24,7 +24,9 @@ public final class BankingRoutes extends RouteBuilder {
         }).handled(false);
         from(consumer(Topics.DATE)).routeId("batch-date").process(this::ingest);
         for (String kind : Topics.KINDS)
-            from(consumer("input."+kind)).routeId("stage-"+kind).process(this::ingest);
+            from(consumer("input."+kind)).routeId("stage-"+kind).process(this::ingest)
+                // Count only after staging and manual acknowledgement succeed on the consumer thread.
+                .to("log:banking.ingest."+kind+"?level=INFO&groupInterval=60000&groupDelay=60000&groupActiveOnly=false");
         from("timer:closed-batches?period=1000&delay=1000").routeId("extract-closed-batches")
             .filter(e -> failure.get() == null)
             .process(e -> { requireHealthy(); files.extractNextClosedBatchIfAvailable(); });
