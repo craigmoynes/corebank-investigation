@@ -17,10 +17,12 @@ public final class Store {
         }
     }
     @FunctionalInterface public interface Work<T> { T run(Connection db) throws Exception; }
-    private final Settings settings;
-    public Store(Settings settings) { this.settings=settings; }
+    @FunctionalInterface private interface Connections { Connection open() throws SQLException; }
+    private final Connections connections;
+    public Store(Settings settings) { connections=settings::connect; }
+    public Store(javax.sql.DataSource dataSource) { connections=dataSource::getConnection; }
     public <T> T inTransaction(Work<T> work) throws Exception {
-        try (Connection db=settings.connect()) {
+        try (Connection db=connections.open()) {
             db.setAutoCommit(false);
             try { T result=work.run(db); db.commit(); return result; }
             catch (Exception e) { try { db.rollback(); } catch (Exception rollback) { e.addSuppressed(rollback); } throw e; }

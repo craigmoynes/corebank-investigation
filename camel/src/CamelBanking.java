@@ -8,6 +8,7 @@
 //DEPS org.apache.camel:camel-direct
 //DEPS org.apache.camel:camel-log
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.18.3
+//DEPS com.zaxxer:HikariCP:6.2.1
 //DEPS org.postgresql:postgresql:42.7.5
 //DEPS org.liquibase:liquibase-core:4.29.2
 //DEPS org.springframework.boot:spring-boot:3.4.4
@@ -31,6 +32,8 @@ import org.apache.camel.main.Main;
 import banking.BankingRoutes;
 import banking.Settings;
 import banking.Topics;
+import banking.Store;
+import banking.DatabasePool;
 import liquibase.Liquibase;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
@@ -71,9 +74,14 @@ public class CamelBanking {
                 if (!rows.getBoolean(1))
                     throw new IllegalStateException("A Camel banking application is already running");
             }
-            Main main = new Main();
-            main.configure().addRoutesBuilder(new BankingRoutes(settings));
-            main.run();
+            // Keep the session advisory-lock lease outside the pool.
+            try (var pool = DatabasePool.create(settings)) {
+                Main main = new Main();
+                try {
+                    main.configure().addRoutesBuilder(new BankingRoutes(settings,new Store(pool)));
+                    main.run();
+                } finally { main.stop(); }
+            }
         }
     }
 }

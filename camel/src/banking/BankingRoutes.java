@@ -12,7 +12,8 @@ public final class BankingRoutes extends RouteBuilder {
     private final Store store;
     private final FilesBridge files;
     private final AtomicReference<Throwable> failure=new AtomicReference<>();
-    public BankingRoutes(Settings settings) { this.settings=settings; store=new Store(settings); files=new FilesBridge(store,settings); }
+    public BankingRoutes(Settings settings) { this(settings,new Store(settings)); }
+    public BankingRoutes(Settings settings, Store store) { this.settings=settings; this.store=store; files=new FilesBridge(store,settings); }
     @Override public void configure() {
         // Waiting for the initial date is expected. Other failures latch every route until restart.
         onException(Store.AwaitingClock.class).maximumRedeliveries(0).logExhausted(false).handled(false);

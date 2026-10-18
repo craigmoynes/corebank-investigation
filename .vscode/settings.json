@@ -6,5 +6,6 @@
         "COREBANK_TEST_DB_URL" : "jdbc:postgresql://localhost:55432/corebank_test",
         "COREBANK_TEST_DB_USER" : "postgres",
         "COREBANK_TEST_DB_PASSWORD" : "test_only"
-    }
+    },
+    "python.terminal.useEnvFile": true
 }

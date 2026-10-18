@@ -150,6 +150,17 @@ For other runs, reconcile the intended business keys and records; reference
 upserts and duplicate records mean counts alone are not always sufficient.
 Use `\q` to exit. Broker acknowledgement alone does not confirm staging.
 
+## Database connection pooling
+
+Route database work uses an application-owned HikariCP pool with at most seven
+connections and one minimum idle connection. Connections are returned after each
+transaction and the pool closes after Camel stops. Startup migration and the
+session advisory-lock lease keep dedicated, unpooled connections.
+
+Each input message still has its own database transaction and Kafka acknowledgement.
+Polling, partitioning, clock locking, and insert behaviour are unchanged; this is
+connection reuse only, with no batching.
+
 ## Route and recovery behavior
 
 1. The date route persists its clock and opens/closes batches atomically. A repeated
@@ -386,3 +397,9 @@ without implying any ordering guarantee across the production topics:
 ```sh
 CAMEL_TEST_BROKERS=localhost:39092 jbang camel/tests/KafkaGeneratorTests.java
 ```
+
+## Profiling socket reads
+
+Use the [JFR profiling guide and socket-read parser](performance/README.md) to report database read durations
+by operation, with thread/time filters and CSV or JSON export. It analyses saved
+recordings without changing the running application.

@@ -8,6 +8,7 @@
 //DEPS org.apache.camel:camel-direct
 //DEPS org.apache.camel:camel-log
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.18.3
+//DEPS com.zaxxer:HikariCP:6.2.1
 //DEPS org.postgresql:postgresql:42.7.5
 //DEPS org.liquibase:liquibase-core:4.29.2
 //DEPS org.springframework.boot:spring-boot:3.4.4

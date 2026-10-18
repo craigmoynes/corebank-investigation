@@ -17,6 +17,7 @@ public class BankingTest {
     @TempDir Path root;
     Settings settings;
     Store store;
+    com.zaxxer.hikari.HikariDataSource pool;
     FilesBridge files;
     static final String CUSTOMER="{\"customerId\":1,\"firstName\":\"José\",\"lastName\":\"Doe\",\"addressLine1\":\"123 Main\",\"city\":\"Toronto\",\"province\":\"ON\",\"postalCode\":\"A1B 2C3\",\"country\":\"Canada\"}";
     static final String ACCOUNT="{\"accountId\":2,\"startDate\":\"2026-10-09\",\"endDate\":null,\"accountType\":\"CHECKING\"}";
@@ -26,13 +27,15 @@ public class BankingTest {
     @BeforeEach void setup() throws Exception {
         settings=new Settings(System.getenv().getOrDefault("CAMEL_TEST_BROKERS","localhost:39092"),"test-"+UUID.randomUUID(),
             System.getenv("COREBANK_TEST_DB_URL"),"postgres",System.getenv("COREBANK_TEST_DB_PASSWORD"),root.resolve("input"),root.resolve("output"),root.resolve("error"));
-        store=new Store(settings); files=new FilesBridge(store,settings);
+        pool=DatabasePool.create(settings);
+        store=new Store(pool); files=new FilesBridge(store,settings);
         try (var db=settings.connect(); var s=db.createStatement()) {
             s.execute("TRUNCATE camel_ingest.record,camel_ingest.receipt,camel_ingest.batch,camel_ingest.publication");
             s.execute("UPDATE camel_ingest.clock SET active_date=NULL");
         }
         Files.createDirectories(settings.output());
     }
+    @AfterEach void closePool() { if (pool != null) pool.close(); }
     Store.Source source(String topic,long offset,String key,String value) { return new Store.Source(topic,0,offset,key,value); }
     LocalDate date(long offset,String value) throws Exception { return store.accept(source(Topics.DATE,offset,"clock",value)); }
     void initial() throws Exception { date(0,"2026-10-09"); }
@@ -41,6 +44,27 @@ public class BankingTest {
         store.accept(source("input.relationship",0,"2:1",RELATIONSHIP)); store.accept(source("input.transaction",0,"3",TRANSACTION));
     }
     long scalar(String sql) throws Exception { try(var db=settings.connect();var s=db.createStatement();var r=s.executeQuery(sql)) { r.next();return r.getLong(1); } }
+    @Test void poolReusesConnectionsAndRollsBackFailedWork() throws Exception {
+        pool.setMaximumPoolSize(1);
+        int backend;
+        try (var db=pool.getConnection(); var s=db.createStatement(); var r=s.executeQuery("SELECT pg_backend_pid()")) {
+            r.next(); backend=r.getInt(1);
+        }
+        assertThrows(IllegalStateException.class,() -> store.inTransaction(db -> {
+            Store.execute(db,"INSERT INTO camel_ingest.batch(batch_date) VALUES (?)",DAY);
+            throw new IllegalStateException("test rollback");
+        }));
+        try (var db=pool.getConnection(); var s=db.createStatement(); var r=s.executeQuery("SELECT pg_backend_pid()")) {
+            r.next(); assertEquals(backend,r.getInt(1));
+            assertTrue(db.getAutoCommit());
+        }
+        assertEquals(0,scalar("SELECT count(*) FROM camel_ingest.batch"));
+        initial();
+        assertEquals(1,scalar("SELECT count(*) FROM camel_ingest.batch"));
+        pool.close();
+        assertTrue(pool.isClosed());
+        assertThrows(java.sql.SQLException.class,() -> pool.getConnection());
+    }
     @Test void requiresInitialDateAndPersistsClock() throws Exception {
         assertThrows(Store.AwaitingClock.class,() -> store.accept(source("input.account",0,"2",ACCOUNT)));
         assertEquals(0,scalar("SELECT count(*) FROM camel_ingest.receipt"));
@@ -277,7 +301,7 @@ public class BankingTest {
             var context=new DefaultCamelContext()) {
             // Test broker is reset between suite runs; no production topics are touched.
             producer.send(new ProducerRecord<>("input.account","2",ACCOUNT)).get();
-            context.addRoutes(new BankingRoutes(settings)); context.start();
+            context.addRoutes(new BankingRoutes(settings,new Store(pool))); context.start();
             Thread.sleep(2000);
             assertEquals(0,scalar("SELECT count(*) FROM camel_ingest.receipt"));
             producer.send(new ProducerRecord<>(Topics.DATE,"clock","2026-10-09")).get();
@@ -299,7 +323,7 @@ public class BankingTest {
             context.stop();
             // Fresh context and the same group must not restage consumed input or republish the file.
             try(var restarted=new DefaultCamelContext()) {
-                restarted.addRoutes(new BankingRoutes(settings)); restarted.start(); Thread.sleep(2000);
+                restarted.addRoutes(new BankingRoutes(settings,new Store(pool))); restarted.start(); Thread.sleep(2000);
                 assertEquals(4,scalar("SELECT count(*) FROM camel_ingest.record"));
                 assertEquals(6,scalar("SELECT count(*) FROM camel_ingest.receipt"));
                 assertTrue(consumer.poll(Duration.ofSeconds(2)).isEmpty());
