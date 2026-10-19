@@ -2,6 +2,7 @@ package banking;
 
 import java.sql.*;
 import java.time.LocalDate;
+import java.util.*;
 
 /** Each callback owns a fresh JDBC transaction. The clock row serializes assignment and closure. */
 public final class Store {
@@ -29,6 +30,7 @@ public final class Store {
         }
     }
     public LocalDate accept(Source source) throws Exception {
+        if (!Topics.DATE.equals(source.topic())) return acceptBatch(List.of(source)).getFirst();
         Accepted accepted=inTransaction(db -> {
             LocalDate control;
             try (var s=db.createStatement(); var r=s.executeQuery("SELECT active_date FROM camel_ingest.clock WHERE singleton FOR UPDATE")) {
@@ -58,32 +60,7 @@ public final class Store {
                 receipt(db,source,active);
                 return new Accepted(active,control,control == null || !control.equals(next),false);
             }
-            if (control == null) throw new AwaitingClock();
-            String kind=source.topic().startsWith("input.") ? source.topic().substring(6) : "";
-            Records.Row row=Records.decode(kind,source.payload());
-            if (!row.key().equals(source.key())) throw new IllegalArgumentException("Kafka key must match business key "+row.key());
-            LocalDate active=control;
-            // A transaction ID is immutable even within a day's staging; identical repeats are safe.
-            if (kind.equals("transaction")) {
-                try (var s=db.prepareStatement("SELECT fixed_line FROM camel_ingest.record WHERE batch_date=? AND kind='transaction' AND business_key=?")) {
-                    s.setObject(1,active); s.setString(2,row.key());
-                    try (var r=s.executeQuery()) {
-                        if (r.next() && !r.getString(1).equals(row.line())) throw new IllegalArgumentException("Conflicting transaction ID "+row.key());
-                    }
-                }
-            }
-            receipt(db,source,active);
-            try (var s=db.prepareStatement("""
-                INSERT INTO camel_ingest.record(batch_date,kind,business_key,fixed_line,topic,partition_id,source_offset)
-                VALUES (?,?,?,?,?,?,?) ON CONFLICT (batch_date,kind,business_key)
-                DO UPDATE SET fixed_line=excluded.fixed_line,topic=excluded.topic,
-                  partition_id=excluded.partition_id,source_offset=excluded.source_offset
-                WHERE camel_ingest.record.source_offset < excluded.source_offset
-                """)) {
-                s.setObject(1,active); s.setString(2,kind); s.setString(3,row.key()); s.setString(4,row.line());
-                s.setString(5,source.topic()); s.setInt(6,source.partition()); s.setLong(7,source.offset()); s.executeUpdate();
-            }
-            return new Accepted(active,control,false,false);
+            throw new IllegalArgumentException("Unsupported control topic");
         });
         // Report persisted state only after the transaction has committed.
         if (accepted.dateChanged()) {
@@ -98,6 +75,77 @@ public final class Store {
             accepted.date(),source.topic(),source.partition(),source.offset());
         return accepted.date();
     }
+    /** One bounded data batch, one clock lock and one commit. Dates retain their control path. */
+    public List<LocalDate> acceptBatch(List<Source> sources) throws Exception {
+        if (sources.isEmpty() || sources.size()>100) throw new IllegalArgumentException("Batch size must be 1..100");
+        String topic=sources.getFirst().topic();
+        if (!topic.startsWith("input.") || sources.stream().anyMatch(s -> !s.topic().equals(topic)))
+            throw new IllegalArgumentException("A data batch must contain one input topic");
+        return inTransaction(db -> {
+            LocalDate active;
+            try (var s=db.createStatement(); var r=s.executeQuery("SELECT active_date FROM camel_ingest.clock WHERE singleton FOR UPDATE")) {
+                if (!r.next()) throw new IllegalStateException("Missing clock singleton");
+                active=r.getObject(1,LocalDate.class);
+            }
+            record Receipt(LocalDate date,String payload) {}
+            var receipts=new HashMap<Long,Receipt>();
+            try (var s=db.prepareStatement("SELECT source_offset,batch_date,payload FROM camel_ingest.receipt WHERE topic=? AND partition_id=0 AND source_offset IN ("+placeholders(sources.size())+")")) {
+                s.setString(1,topic);
+                for(int i=0;i<sources.size();i++) s.setLong(i+2,sources.get(i).offset());
+                try(var r=s.executeQuery()) { while(r.next()) receipts.put(r.getLong(1),new Receipt(r.getObject(2,LocalDate.class),r.getString(3))); }
+            }
+            String kind=topic.substring(6);
+            var dates=new ArrayList<LocalDate>();
+            var fresh=new ArrayList<Source>();
+            record Staged(Source source,Records.Row row) {}
+            var staged=new LinkedHashMap<String,Staged>();
+            for(var source:sources) {
+                var prior=receipts.get(source.offset());
+                if(prior!=null) {
+                    if(!prior.payload().equals(source.payload())) throw new IllegalArgumentException("Source identity reused with different payload");
+                    dates.add(prior.date()); continue;
+                }
+                if(active==null) throw new AwaitingClock();
+                var row=Records.decode(kind,source.payload());
+                if(!row.key().equals(source.key())) throw new IllegalArgumentException("Kafka key must match business key "+row.key());
+                var previous=staged.get(row.key());
+                if(kind.equals("transaction") && previous!=null && !previous.row().line().equals(row.line()))
+                    throw new IllegalArgumentException("Conflicting transaction ID "+row.key());
+                if(previous==null || previous.source().offset()<source.offset()) staged.put(row.key(),new Staged(source,row));
+                fresh.add(source); receipts.put(source.offset(),new Receipt(active,source.payload())); dates.add(active);
+            }
+            if(fresh.isEmpty()) return List.copyOf(dates);
+            if(kind.equals("transaction")) {
+                try(var s=db.prepareStatement("SELECT business_key,fixed_line FROM camel_ingest.record WHERE batch_date=? AND kind='transaction' AND business_key IN ("+placeholders(staged.size())+")")) {
+                    s.setObject(1,active); int i=2;
+                    for(var key:staged.keySet()) s.setString(i++,key);
+                    try(var r=s.executeQuery()) { while(r.next()) {
+                        if(!staged.get(r.getString(1)).row().line().equals(r.getString(2)))
+                            throw new IllegalArgumentException("Conflicting transaction ID "+r.getString(1));
+                    } }
+                }
+            }
+            try(var s=db.prepareStatement("INSERT INTO camel_ingest.receipt(topic,partition_id,source_offset,batch_date,payload) VALUES "+values(fresh.size(),5))) {
+                int i=1;
+                for(var source:fresh) {
+                    s.setString(i++,topic); s.setInt(i++,source.partition()); s.setLong(i++,source.offset());
+                    s.setObject(i++,active); s.setString(i++,source.payload());
+                }
+                s.executeUpdate();
+            }
+            try(var s=db.prepareStatement("INSERT INTO camel_ingest.record(batch_date,kind,business_key,fixed_line,topic,partition_id,source_offset) VALUES "+values(staged.size(),7)+" ON CONFLICT (batch_date,kind,business_key) DO UPDATE SET fixed_line=excluded.fixed_line,topic=excluded.topic,partition_id=excluded.partition_id,source_offset=excluded.source_offset WHERE camel_ingest.record.source_offset < excluded.source_offset")) {
+                int i=1;
+                for(var entry:staged.values()) {
+                    s.setObject(i++,active); s.setString(i++,kind); s.setString(i++,entry.row().key()); s.setString(i++,entry.row().line());
+                    s.setString(i++,topic); s.setInt(i++,entry.source().partition()); s.setLong(i++,entry.source().offset());
+                }
+                s.executeUpdate();
+            }
+            return List.copyOf(dates);
+        });
+    }
+    private static String placeholders(int count) { return String.join(",",Collections.nCopies(count,"?")); }
+    private static String values(int rows,int columns) { return String.join(",",Collections.nCopies(rows,"("+placeholders(columns)+")")); }
     private static void identity(PreparedStatement s,Source source) throws SQLException {
         s.setString(1,source.topic()); s.setInt(2,source.partition()); s.setLong(3,source.offset());
     }

@@ -157,9 +157,27 @@ connections and one minimum idle connection. Connections are returned after each
 transaction and the pool closes after Camel stops. Startup migration and the
 session advisory-lock lease keep dedicated, unpooled connections.
 
-Each input message still has its own database transaction and Kafka acknowledgement.
-Polling, partitioning, clock locking, and insert behaviour are unchanged; this is
-connection reuse only, with no batching.
+Pooling remains unchanged. Data ingestion now uses a separate bounded batching
+change: at most **100 messages** from one topic/partition, with a **50 ms** flush
+interval and poll timeout. Partial batches flush on the consumer thread; actual
+latency includes polling, scheduling and database work. There is no asynchronous
+aggregation timer or worker handoff.
+
+Each batch borrows one connection, locks/reads the active date once, and commits
+once. Receipt identities are fetched in one query; transaction conflicts are
+checked in memory and with one set-based database query. Receipts and staging
+rows each use one multi-row INSERT. Repeated reference keys are reduced to the
+highest offset before the upsert; every distinct source still gets a receipt.
+A new transaction batch therefore uses five SQL statements plus one commit,
+independent of its size (up to 100). All validation and both writes roll back
+together on failure. Replay preserves the original receipt date and staged time.
+
+Only after the database commit succeeds does the same Kafka consumer thread
+synchronously acknowledge the last offset of that batch. A crash between the two
+commits safely replays the batch. Date controls remain single-message transactions
+and share the clock lock with data batches, so all fresh records in a batch receive
+one active date. Partition counts, business keys, pool settings and producer
+configuration are unchanged.
 
 ## Route and recovery behavior
 
@@ -255,7 +273,7 @@ thread, logger and exception formatting. Spring Boot supplies logging resources
 only; Camel does not start a Spring application context. Console colours follow
 Boot’s terminal detection. Framework logging remains at INFO with `--debug`.
 
-DEBUG records staging, source-receipt duplicates, Kafka offset acknowledgement,
+DEBUG records persisted input assignments, Kafka batch offset acknowledgement,
 and individual balance sends. Input logs identify topic/partition/offset and
 assigned batch date; balance logs identify file and one-based record number.
 Payloads and balances are not included in these application messages.

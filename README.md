@@ -177,3 +177,22 @@ choose an unused date after previously completed batches. Do not generate files
 for a date owned by Camel. See the
 [file generator guide](corebank/README.md#generate-sample-input-files) for counts,
 seeds, reference requirements, and custom directories.
+
+## Run all tests
+
+```sh
+sh tests/run.sh
+```
+
+Runs all ten suite entry points: core readers, trigger monitoring, ingestion and
+schema, processing, batch jobs, generation, Kafka generation (including the real
+broker test), Kafka CLI, Camel banking integration, and the JFR parser. Requires
+JBang/Java 21, Docker Compose, and Python with the
+[parser dependencies](camel/performance/tools/README.md). The runner uses
+`.env/bin/python` when available, otherwise `python3`; override with `TEST_PYTHON`.
+
+Tests run sequentially against disposable PostgreSQL and Redpanda containers;
+production services and data are not used. Do not run other test stacks at the
+same time: they share port 55432. The runner removes its containers on exit,
+continues through suite failures, returns a nonzero status if any suite fails,
+and prints the temporary directory containing each suite's log.

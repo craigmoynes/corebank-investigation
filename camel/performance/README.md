@@ -110,3 +110,40 @@ upserts. It reports counts, total time, mean, and p95; CSV/JSON also include max
 ```
 
 See [parser options and limitations](tools/README.md) for time filters and tests.
+
+## Batching comparison (unprofiled)
+
+The pooling reference supplied for this change is **13.294 seconds** for 10,000
+messages. Run the correctness suite first (`sh camel/tests/run.sh`). For each of
+three runs, use the same generator command, workload, timing boundaries and
+runtime conditions as that reference, with fresh transaction IDs. Keep the
+existing one partition per topic and transaction-ID Kafka key. Start Camel
+normally (no JFR recording and no DEBUG logging). Batching defaults are 100
+messages and a 50 ms flush interval; pooling settings are unchanged.
+
+Capture the first and last transaction-topic offsets belonging to each run.
+After all 10,000 receipts are visible, this query measures the receipt timestamp
+span for exactly that range (replace the psql variables with your offsets):
+
+```sql
+SELECT count(*) AS messages,
+       min(staged_at) AS first_receipt,
+       max(staged_at) AS last_receipt,
+       extract(epoch FROM max(staged_at)-min(staged_at)) AS receipt_span_seconds
+FROM camel_ingest.receipt
+WHERE topic='input.transaction' AND partition_id=0
+  AND source_offset BETWEEN :first_offset AND :last_offset;
+```
+
+Receipt span excludes work before the first insert and after the last insert,
+including the final commit and Kafka acknowledgement. Use it for the comparison
+only if the pooling baseline used the same definition. For end-to-end timing,
+retain the baseline's start event and wait for both the final database receipt
+and the consumer group's committed offset to reach `last_offset + 1`. Verify
+10,000 distinct staged transaction IDs as well as 10,000 receipts; duplicate
+replay is a different workload. Do not close the active business date mid-run.
+
+Record all three durations. Their middle value is the median; compare it with
+13.294 s using `speedup = 13.294 / median` and
+`reduction_percent = 100 * (13.294 - median) / 13.294`. Measurements are pending
+user execution; no batching speedup is claimed yet.

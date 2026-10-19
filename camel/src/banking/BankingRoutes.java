@@ -1,6 +1,7 @@
 package banking;
 
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.List;
 import org.apache.camel.Exchange;
 import org.apache.camel.ProducerTemplate;
 import org.apache.camel.builder.RouteBuilder;
@@ -25,9 +26,10 @@ public final class BankingRoutes extends RouteBuilder {
         }).handled(false);
         from(consumer(Topics.DATE)).routeId("batch-date").process(this::ingest);
         for (String kind : Topics.KINDS)
-            from(consumer("input."+kind)).routeId("stage-"+kind).process(this::ingest)
+            from(consumer("input."+kind)).routeId("stage-"+kind).process(this::ingestBatch)
+                .split(body()).synchronous()
                 // Count only after staging and manual acknowledgement succeed on the consumer thread.
-                .to("log:banking.ingest."+kind+"?level=INFO&groupInterval=60000&groupDelay=60000&groupActiveOnly=false");
+                .to("log:banking.ingest."+kind+"?level=INFO&groupInterval=60000&groupDelay=60000&groupActiveOnly=false").end();
         from("timer:closed-batches?period=1000&delay=1000").routeId("extract-closed-batches")
             .filter(e -> failure.get() == null)
             .process(e -> { requireHealthy(); files.extractNextClosedBatchIfAvailable(); });
@@ -46,9 +48,31 @@ public final class BankingRoutes extends RouteBuilder {
     private String consumer(String topic) {
         return "kafka:"+topic+"?brokers="+settings.brokers()+"&groupId="+settings.group()
             +"&autoOffsetReset=earliest&autoCommitEnable=false&allowManualCommit=true&breakOnFirstError=true"
-            +"&maxPollRecords=1&consumersCount=1&pollTimeoutMs=1000&additionalProperties.allow.auto.create.topics=false";
+            +(Topics.DATE.equals(topic) ? "&maxPollRecords=1&pollTimeoutMs=1000" : "&batching=true&maxPollRecords=100&pollTimeoutMs=50&batchingIntervalMs=50")
+            +"&consumersCount=1&additionalProperties.allow.auto.create.topics=false";
     }
     private void requireHealthy() { if (failure.get() != null) throw new IllegalStateException("Routes blocked until restart",failure.get()); }
+    private void ingestBatch(Exchange exchange) throws Exception {
+        requireHealthy();
+        @SuppressWarnings("unchecked")
+        List<Exchange> messages=(List<Exchange>)exchange.getMessage().getBody(List.class);
+        // Bundle exchanges have no source headers; retain the first source for failure diagnostics.
+        var first=messages.getFirst().getMessage();
+        for(String header:List.of(KafkaConstants.TOPIC,KafkaConstants.PARTITION,KafkaConstants.OFFSET))
+            exchange.getMessage().setHeader(header,first.getHeader(header));
+        var sources=messages.stream().map(e -> {
+            var m=e.getMessage();
+            return new Store.Source(m.getHeader(KafkaConstants.TOPIC,String.class),
+                m.getHeader(KafkaConstants.PARTITION,Integer.class),m.getHeader(KafkaConstants.OFFSET,Long.class),
+                m.getHeader(KafkaConstants.KEY,String.class),m.getBody(String.class));
+        }).toList();
+        var dates=store.acceptBatch(sources);
+        for(int i=0;i<sources.size();i++) log.debug("Input persisted batchDate={} topic={} partition={} offset={}",
+            dates.get(i),sources.get(i).topic(),sources.get(i).partition(),sources.get(i).offset());
+        // One topic/partition per route: acknowledge the last offset only after the DB commit.
+        exchange.getMessage().getHeader(KafkaConstants.MANUAL_COMMIT,KafkaManualCommit.class).commit();
+        log.debug("Kafka batch acknowledged topic={} messages={} lastOffset={}",sources.getFirst().topic(),sources.size(),sources.getLast().offset());
+    }
     private void ingest(Exchange e) throws Exception {
         requireHealthy();
         var m=e.getMessage();

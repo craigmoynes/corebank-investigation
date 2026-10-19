@@ -212,6 +212,58 @@ public class BankingTest {
         assertThrows(IllegalArgumentException.class,() -> store.accept(source("input.account",0,"wrong",ACCOUNT)));
         assertEquals(2,scalar("SELECT count(*) FROM camel_ingest.receipt"));
     }
+    @Test void boundedBatchesReplayRollbackRestartAndRollover() throws Exception {
+        initial();
+        var batch=new ArrayList<Store.Source>();
+        for(int i=0;i<100;i++) batch.add(source("input.transaction",i,Integer.toString(i+3),TRANSACTION.replace("\"transactionId\":3","\"transactionId\":"+(i+3))));
+        assertEquals(Collections.nCopies(100,DAY),store.acceptBatch(batch));
+        assertEquals(100,scalar("SELECT count(*) FROM camel_ingest.record"));
+        date(1,"2026-10-10");
+        assertEquals(Collections.nCopies(100,DAY),new Store(pool).acceptBatch(batch));
+        assertEquals(102,scalar("SELECT count(*) FROM camel_ingest.receipt"));
+        var next=source("input.transaction",100,"3",TRANSACTION);
+        assertEquals(List.of(DAY,DAY.plusDays(1)),store.acceptBatch(List.of(batch.getFirst(),next)));
+        var fresh=source("input.transaction",101,"999",TRANSACTION.replace("\"transactionId\":3","\"transactionId\":999"));
+        var conflict=source("input.transaction",102,"3",TRANSACTION.replace("12345","999"));
+        assertThrows(IllegalArgumentException.class,() -> store.acceptBatch(List.of(fresh,conflict)));
+        assertEquals(103,scalar("SELECT count(*) FROM camel_ingest.receipt"));
+        assertThrows(IllegalArgumentException.class,() -> store.acceptBatch(List.of(fresh,source("input.transaction",102,"999",fresh.payload().replace("12345","999")))));
+        assertThrows(IllegalArgumentException.class,() -> store.acceptBatch(List.of(source("input.transaction",0,"3",TRANSACTION.replace("12345","999")))));
+        assertThrows(IllegalArgumentException.class,() -> store.acceptBatch(Collections.nCopies(101,next)));
+        // Force a database failure after the bulk receipt insert to verify actual rollback.
+        try(var db=settings.connect();var st=db.createStatement()) {
+            st.execute("ALTER TABLE camel_ingest.record ADD CONSTRAINT test_reject_key CHECK (business_key <> '999')");
+            try { assertThrows(java.sql.SQLException.class,() -> store.acceptBatch(List.of(fresh))); }
+            finally { st.execute("ALTER TABLE camel_ingest.record DROP CONSTRAINT test_reject_key"); }
+        }
+        assertEquals(103,scalar("SELECT count(*) FROM camel_ingest.receipt"));
+        assertEquals(List.of(DAY.plusDays(1)),new Store(pool).acceptBatch(List.of(fresh)));
+    }
+    @Test void racingBatchAndRolloverAssignWholeBatchTogether() throws Exception {
+        initial();
+        var inputs=List.of(source("input.account",0,"2",ACCOUNT),
+            source("input.account",1,"3",ACCOUNT.replace("\"accountId\":2","\"accountId\":3")));
+        try(var executor=Executors.newVirtualThreadPerTaskExecutor()) {
+            var start=new CountDownLatch(1);
+            var batch=executor.submit(() -> { start.await(); return store.acceptBatch(inputs); });
+            var rollover=executor.submit(() -> { start.await(); return date(1,"2026-10-10"); });
+            start.countDown();
+            var dates=batch.get(5,TimeUnit.SECONDS);
+            assertEquals(dates.getFirst(),dates.getLast());
+            assertTrue(dates.getFirst().equals(DAY) || dates.getFirst().equals(DAY.plusDays(1)));
+            assertEquals(DAY.plusDays(1),rollover.get(5,TimeUnit.SECONDS));
+            assertEquals(dates,new Store(pool).acceptBatch(inputs));
+        }
+    }
+    @Test void batchReferenceOrderingAndDuplicateIdentity() throws Exception {
+        initial();
+        var old=source("input.customer",0,"1",CUSTOMER);
+        var newer=source("input.customer",2,"1",CUSTOMER.replace("José","Jane"));
+        store.acceptBatch(List.of(newer,old,old));
+        assertEquals(3,scalar("SELECT count(*) FROM camel_ingest.receipt"));
+        assertEquals(1,scalar("SELECT count(*) FROM camel_ingest.customer WHERE fixed_line LIKE '%Jane%'"));
+        assertThrows(IllegalArgumentException.class,() -> store.acceptBatch(List.of(source("input.customer",3,"wrong",CUSTOMER))));
+    }
     @Test void strictJsonUnicodeAndNumericBoundaries() throws Exception {
         assertEquals(88,Records.decode("customer",CUSTOMER).line().codePointCount(0,Records.decode("customer",CUSTOMER).line().length()));
         assertEquals(Records.decode("customer",CUSTOMER),Records.decode("customer",CUSTOMER.replace("José","Jose\u0301")));
@@ -327,6 +379,28 @@ public class BankingTest {
                 assertEquals(4,scalar("SELECT count(*) FROM camel_ingest.record"));
                 assertEquals(6,scalar("SELECT count(*) FROM camel_ingest.receipt"));
                 assertTrue(consumer.poll(Duration.ofSeconds(2)).isEmpty());
+                try(var admin=org.apache.kafka.clients.admin.Admin.create(Map.of("bootstrap.servers",settings.brokers()))) {
+                    var partition=new org.apache.kafka.common.TopicPartition("input.account",0);
+                    await(() -> {
+                        var offset=admin.listConsumerGroupOffsets(settings.group()).partitionsToOffsetAndMetadata().get().get(partition);
+                        return offset!=null && offset.offset()==1;
+                    });
+                    try(var db=settings.connect();var st=db.createStatement()) {
+                        st.execute("ALTER TABLE camel_ingest.record ADD CONSTRAINT test_route_failure CHECK (business_key <> '999')");
+                    }
+                    producer.send(new ProducerRecord<>("input.account","999",ACCOUNT.replace("\"accountId\":2","\"accountId\":999"))).get();
+                    Thread.sleep(1500);
+                    assertEquals(1,admin.listConsumerGroupOffsets(settings.group()).partitionsToOffsetAndMetadata().get().get(partition).offset());
+                    assertEquals(6,scalar("SELECT count(*) FROM camel_ingest.receipt"));
+                    restarted.stop();
+                    try(var db=settings.connect();var st=db.createStatement()) { st.execute("ALTER TABLE camel_ingest.record DROP CONSTRAINT test_route_failure"); }
+                    try(var recovered=new DefaultCamelContext()) {
+                        recovered.addRoutes(new BankingRoutes(settings,new Store(pool))); recovered.start();
+                        await(() -> scalar("SELECT count(*) FROM camel_ingest.receipt")==7);
+                        await(() -> admin.listConsumerGroupOffsets(settings.group()).partitionsToOffsetAndMetadata().get().get(partition).offset()==2);
+                    }
+                }
+
             }
         }
     }
